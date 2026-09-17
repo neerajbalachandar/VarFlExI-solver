@@ -8,22 +8,3 @@ This codebase implements **$\texttt{VarFlExI}$**, a partitioned framework that f
 <img width="1084" height="565" alt="Screenshot from 2026-08-30 18-42-47" src="https://github.com/user-attachments/assets/c95eef81-2e2f-4ae7-a6c4-f92f189bae21" />
 <img width="1018" height="416" alt="Screenshot from 2026-08-30 18-43-53" src="https://github.com/user-attachments/assets/be8b5697-d437-4b4d-97ae-6784b91a0f01" />
 
-
-
-#### Run Coupling code
-python coupling/varflexi.py --config_path "$CONFIG_DIR" &
-COUPLING_PID=$!
-
-#### Run Solid solver
-python solid/structural_solver.py --config_path "$CONFIG_DIR" &
-SOLID_PID=$!
-
-#### Run Fluid solver
-julia --project="$PROJECT_DIR" \
-    fluid/fluid.jl \
-    --fluid "$CONFIG_DIR/fluid_params.yaml" \
-    --solid "$CONFIG_DIR/solid_params.yaml" \
-    --coupling "$CONFIG_DIR/coupling_params.yaml"
-
-
-Run the file ./run.sh
