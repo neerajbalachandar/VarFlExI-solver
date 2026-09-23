@@ -324,6 +324,13 @@ class VarFlExICoupler:
                     "force_relative_error",
                     "force_transfer_residual",
                     "force_transfer_relative_error",
+                    "force_transfer_apply_time",
+                    "geometry_transfer_apply_time",
+                    "solid_solve_time",
+                    "solid_io_time",
+                    "crm_setup_time",
+                    "rbf_setup_time",
+                    "geometry_rbf_setup_time",
                     "geometry_work_Wf",
                     "geometry_work_Ws",
                     "geometry_work_rel_error",
@@ -453,6 +460,13 @@ class VarFlExICoupler:
                 force_transfer_relative_error = optional_float(
                     force_transfer_data, "force_transfer_relative_error"
                 )
+                force_transfer_apply_time = optional_float(force_transfer_data, "force_transfer_apply_time")
+                geometry_transfer_apply_time = optional_float(geo_data, "geometry_transfer_apply_time")
+                solid_solve_time = optional_float(geo_data, "solid_solve_time")
+                solid_io_time = optional_float(geo_data, "solid_io_time")
+                crm_setup_time = optional_float(force_transfer_data, "crm_setup_time")
+                rbf_setup_time = optional_float(force_transfer_data, "rbf_setup_time")
+                geometry_rbf_setup_time = optional_float(force_transfer_data, "geometry_rbf_setup_time")
                 geometry_work_Wf = optional_float(force_transfer_data, "geometry_work_Wf")
                 geometry_work_Ws = optional_float(force_transfer_data, "geometry_work_Ws")
                 geometry_work_rel_error = optional_float(
@@ -472,6 +486,13 @@ class VarFlExICoupler:
                         "force_relative_error": force_relative_error,
                         "force_transfer_residual": force_transfer_residual,
                         "force_transfer_relative_error": force_transfer_relative_error,
+                        "force_transfer_apply_time": force_transfer_apply_time,
+                        "geometry_transfer_apply_time": geometry_transfer_apply_time,
+                        "solid_solve_time": solid_solve_time,
+                        "solid_io_time": solid_io_time,
+                        "crm_setup_time": crm_setup_time,
+                        "rbf_setup_time": rbf_setup_time,
+                        "geometry_rbf_setup_time": geometry_rbf_setup_time,
                         "geometry_work_Wf": geometry_work_Wf,
                         "geometry_work_Ws": geometry_work_Ws,
                         "geometry_work_rel_error": geometry_work_rel_error,
@@ -505,6 +526,13 @@ class VarFlExICoupler:
                         f"{force_relative_error:.6e}",
                         f"{force_transfer_residual:.6e}" if force_transfer_residual == force_transfer_residual else "nan",
                         f"{force_transfer_relative_error:.6e}" if force_transfer_relative_error == force_transfer_relative_error else "nan",
+                        f"{force_transfer_apply_time:.6e}" if force_transfer_apply_time == force_transfer_apply_time else "nan",
+                        f"{geometry_transfer_apply_time:.6e}" if geometry_transfer_apply_time == geometry_transfer_apply_time else "nan",
+                        f"{solid_solve_time:.6e}" if solid_solve_time == solid_solve_time else "nan",
+                        f"{solid_io_time:.6e}" if solid_io_time == solid_io_time else "nan",
+                        f"{crm_setup_time:.6e}" if crm_setup_time == crm_setup_time else "nan",
+                        f"{rbf_setup_time:.6e}" if rbf_setup_time == rbf_setup_time else "nan",
+                        f"{geometry_rbf_setup_time:.6e}" if geometry_rbf_setup_time == geometry_rbf_setup_time else "nan",
                         f"{geometry_work_Wf:.6e}" if geometry_work_Wf == geometry_work_Wf else "nan",
                         f"{geometry_work_Ws:.6e}" if geometry_work_Ws == geometry_work_Ws else "nan",
                         f"{geometry_work_rel_error:.6e}" if geometry_work_rel_error == geometry_work_rel_error else "nan",

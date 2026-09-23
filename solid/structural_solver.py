@@ -317,6 +317,10 @@ class StructuralSolver:
         self.force_relative_errors = np.full((self.Nsteps,), np.nan, dtype=float)
         self.force_transfer_residuals = np.full((self.Nsteps,), np.nan, dtype=float)
         self.force_transfer_relative_errors = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.force_transfer_apply_times = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.geometry_transfer_apply_times = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.solid_solve_times = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.solid_io_times = np.full((self.Nsteps,), np.nan, dtype=float)
         self.geometry_residuals = np.full((self.Nsteps,), np.nan, dtype=float)
         self.geometry_reference_norms = np.full((self.Nsteps,), np.nan, dtype=float)
         self.geometry_relative_errors = np.full((self.Nsteps,), np.nan, dtype=float)
@@ -425,10 +429,13 @@ class StructuralSolver:
 
             nodal_forces = None
             Fs_coeff = None
+            force_transfer_apply_start = perf_counter()
             if self.force_transfer_mode == "crm":
                 _, nodal_forces = self.transfer.apply_force_transfer(forces_eff)
             else:
                 Fs_coeff, nodal_forces = self.transfer.apply_force_transfer(forces_eff)
+            force_transfer_apply_time = perf_counter() - force_transfer_apply_start
+            self.force_transfer_apply_times[i_step] = force_transfer_apply_time
             if not np.isfinite(nodal_forces).all():
                 raise RuntimeError(f"Non-finite mapped nodal forces at solid step {i_step + 1}")
 
@@ -474,6 +481,10 @@ class StructuralSolver:
                 "step": i_step + 1,
                 "force_transfer_residual": force_transfer_residual,
                 "force_transfer_relative_error": force_transfer_relative_error,
+                "force_transfer_apply_time": force_transfer_apply_time,
+                "crm_setup_time": self.transfer.crm_setup_time,
+                "rbf_setup_time": self.transfer.rbf_setup_time,
+                "geometry_rbf_setup_time": self.transfer.geometry_rbf_setup_time,
                 "geometry_work_Wf": geometry_work_Wf,
                 "geometry_work_Ws": geometry_work_Ws,
                 "geometry_work_rel_error": geometry_work_rel_error,
@@ -492,7 +503,10 @@ class StructuralSolver:
                     self.dofs_w,
                 )
 
+            solid_solve_start = perf_counter()
             self._solve_newton_step(ext_force_vec)
+            solid_solve_time = perf_counter() - solid_solve_start
+            self.solid_solve_times[i_step] = solid_solve_time
 
             if self.work_conservative_mode and nodal_forces is not None:
                 interface_disp_prev = self.transfer.get_nodal_displacements_plate(
@@ -547,7 +561,10 @@ class StructuralSolver:
 
             self.model.update_fields()
             t = self.time[i_step + 1]
+            solid_io_start = perf_counter()
             self.xdmf_file.write(self.model.q, t)
+            solid_io_time = perf_counter() - solid_io_start
+            self.solid_io_times[i_step] = solid_io_time
 
             E_elas = self.model.compute_strain_energy()
             E_kin = self.model.compute_kinetic_energy()
@@ -569,11 +586,14 @@ class StructuralSolver:
                     self.dofs_u_y,
                     self.dofs_w,
                 )
+                geometry_transfer_apply_start = perf_counter()
                 u_le_arr, u_te_arr, _u_common_geom, _u_aero_geom = self.transfer.apply_geometry_transfer(
                     self.model.q,
                     fallback_tree=self.interface_tree,
                     fallback_vals=interface_disp_cur,
                 )
+                geometry_transfer_apply_time = perf_counter() - geometry_transfer_apply_start
+                self.geometry_transfer_apply_times[i_step] = geometry_transfer_apply_time
                 if self.enforce_chord_projection:
                     u_le_arr, u_te_arr, chord_len_cur, chord_len_ref = self.transfer.project_le_te_inextensible(
                         u_le_arr, u_te_arr, self.le_targets, self.te_targets
@@ -651,6 +671,9 @@ class StructuralSolver:
                         "geometry_residual": geometry_residual,
                         "geometry_reference_norm": geometry_reference_norm,
                         "geometry_relative_error": geometry_relative_error,
+                        "geometry_transfer_apply_time": geometry_transfer_apply_time,
+                        "solid_solve_time": solid_solve_time,
+                        "solid_io_time": solid_io_time,
                         "solid_step_time": solid_step_time,
                     }
                 )
@@ -675,9 +698,9 @@ class StructuralSolver:
                 "step,time,u_tip,E_elas,E_kin,E_damp,E_tot,work_Wf,work_Ws,work_rel_error,"
                 "geometry_work_Wf,geometry_work_Ws,geometry_work_rel_error,"
                 "force_residual,force_reference_norm,force_relative_error,"
-                "force_transfer_residual,force_transfer_relative_error,"
-                "geometry_residual,geometry_reference_norm,geometry_relative_error,"
-                "step_walltime\n"
+                "force_transfer_residual,force_transfer_relative_error,force_transfer_apply_time,"
+                "geometry_residual,geometry_reference_norm,geometry_relative_error,geometry_transfer_apply_time,"
+                "solid_solve_time,solid_io_time,step_walltime\n"
             )
             for k_idx in range(self.Nsteps):
                 fp.write(
@@ -699,9 +722,13 @@ class StructuralSolver:
                     f"{self.force_relative_errors[k_idx]:.12e},"
                     f"{self.force_transfer_residuals[k_idx]:.12e},"
                     f"{self.force_transfer_relative_errors[k_idx]:.12e},"
+                    f"{self.force_transfer_apply_times[k_idx]:.12e},"
                     f"{self.geometry_residuals[k_idx]:.12e},"
                     f"{self.geometry_reference_norms[k_idx]:.12e},"
                     f"{self.geometry_relative_errors[k_idx]:.12e},"
+                    f"{self.geometry_transfer_apply_times[k_idx]:.12e},"
+                    f"{self.solid_solve_times[k_idx]:.12e},"
+                    f"{self.solid_io_times[k_idx]:.12e},"
                     f"{self.step_walltime[k_idx]:.12e}\n"
                 )
 

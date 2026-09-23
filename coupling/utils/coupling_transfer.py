@@ -1,5 +1,6 @@
 from dolfin import *
 import numpy as np
+from time import perf_counter
 from scipy.spatial import cKDTree
 
 from .common_refinement_mesh import CommonRefinementMesh
@@ -67,12 +68,14 @@ class CouplingTransfer:
             (self.geometry_common_le_targets, self.geometry_common_te_targets)
         )
         self.geometry_aero_targets = np.vstack((self.le_targets, self.te_targets))
+        t_geometry_setup = perf_counter()
         self.geometry_nbr_ids, self.geometry_nbr_w = RBFTransfer.build_local_rbf_map(
             self.geometry_aero_targets[:, :2],
             self.geometry_common_targets[:, :2],
             self.rbf_radius,
             n_neighbors=self.rbf_neighbors,
         )
+        self.geometry_rbf_setup_time = perf_counter() - t_geometry_setup
 
         self.crm_backend = CommonRefinementMesh(self.domain, self.eta_span_comm)
         self.rbf_backend = None
@@ -83,12 +86,17 @@ class CouplingTransfer:
         self.nbr_w = None
         self.A_diag = np.ones((self.cp_targets.shape[0],), dtype=float)
         self.S_lumped = None
+        self.crm_setup_time = 0.0
+        self.rbf_setup_time = 0.0
 
         if self.force_transfer_mode == "crm":
+            t_setup = perf_counter()
             self.crm_transfer_matrix, self.crm_panel_areas, self.crm_panel_polys = (
                 self.crm_backend.build_common_refinement_operator()
             )
+            self.crm_setup_time = perf_counter() - t_setup
         else:
+            t_setup = perf_counter()
             cp_targets_2d = self.cp_targets[:, :2]
             self.rbf_backend = RBFTransfer(
                 cp_targets_2d,
@@ -100,6 +108,8 @@ class CouplingTransfer:
             self.nbr_ids = self.rbf_backend.nbr_ids
             self.nbr_w = self.rbf_backend.nbr_w
             self.S_lumped = self.rbf_backend.S_lumped
+            self.rbf_setup_time = perf_counter() - t_setup
+
 
     def get_aero_surface_node_ids(self):
         v_w = self.model.V.sub(1).collapse()
