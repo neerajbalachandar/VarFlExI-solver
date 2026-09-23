@@ -6,6 +6,8 @@ Compare the tip displacement from two different simulation runs:
 Plots both on the same axes.
 """
 
+# Diagnostics file for tip displacement comparison with the sweep plots.
+
 from pathlib import Path
 import os
 import numpy as np
