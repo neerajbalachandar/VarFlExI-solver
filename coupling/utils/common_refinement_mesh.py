@@ -210,5 +210,40 @@ class CommonRefinementMesh:
         nodal_disp = np.asarray(nodal_disp, dtype=float).reshape(-1, 3)
         return (C.T @ nodal_disp) / np.asarray(panel_areas, dtype=float).reshape(-1, 1)
 
+    @staticmethod
+    def relative_round_trip_error(reference, round_trip, epsilon_reg=1.0e-16):
+        reference = np.asarray(reference, dtype=float).reshape(-1, 3)
+        round_trip = np.asarray(round_trip, dtype=float).reshape(-1, 3)
+        residual = float(np.linalg.norm((round_trip - reference).reshape(-1)))
+        reference_norm = float(np.linalg.norm(reference.reshape(-1)))
+        relative_error = residual / max(reference_norm + float(epsilon_reg), 1.0e-300)
+        return residual, relative_error
+
+    @classmethod
+    def round_trip_force_metrics(cls, panel_forces, C, panel_areas, epsilon_reg=1.0e-16):
+        solid_forces = cls.panel_loads_to_solid_nodal_forces(panel_forces, C, panel_areas)
+        fluid_forces_round_trip = cls.nodal_displacements_to_panel_average(
+            solid_forces, C, panel_areas
+        )
+        residual, relative_error = cls.relative_round_trip_error(
+            panel_forces, fluid_forces_round_trip, epsilon_reg=epsilon_reg
+        )
+        return residual, relative_error, fluid_forces_round_trip
+
+    @classmethod
+    def round_trip_displacement_metrics(
+        cls, nodal_displacements, C, panel_areas, epsilon_reg=1.0e-16
+    ):
+        panel_displacements = cls.nodal_displacements_to_panel_average(
+            nodal_displacements, C, panel_areas
+        )
+        nodal_displacements_round_trip = cls.panel_loads_to_solid_nodal_forces(
+            panel_displacements, C, panel_areas
+        )
+        residual, relative_error = cls.relative_round_trip_error(
+            nodal_displacements, nodal_displacements_round_trip, epsilon_reg=epsilon_reg
+        )
+        return residual, relative_error, nodal_displacements_round_trip
+
 
 __all__ = ["CommonRefinementMesh"]

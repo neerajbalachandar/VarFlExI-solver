@@ -362,6 +362,19 @@ class CouplingTransfer:
         relative_error = residual / max(reference_norm + float(epsilon_reg), 1.0e-300)
         return residual, relative_error, structural_common
 
+    def displacement_transfer_metrics(self, nodal_displacements, epsilon_reg=1.0e-16):
+        nodal_displacements = np.asarray(nodal_displacements, dtype=float).reshape(-1, 3)
+        if self.force_transfer_mode == "crm":
+            return self.crm_backend.round_trip_displacement_metrics(
+                nodal_displacements,
+                self.crm_transfer_matrix,
+                self.crm_panel_areas,
+                epsilon_reg=epsilon_reg,
+            )
+        return self.rbf_backend.round_trip_displacement_metrics(
+            nodal_displacements, epsilon_reg=epsilon_reg
+        )
+
     def span_edges_from_stations(self, eta_span_vals):
         return self.crm_backend.span_edges_from_stations(eta_span_vals)
 

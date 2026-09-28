@@ -325,6 +325,10 @@ class VarFlExICoupler:
                     "force_transfer_residual",
                     "force_transfer_relative_error",
                     "force_transfer_apply_time",
+                    "fluid_force_round_trip_residual",
+                    "fluid_force_round_trip_relative_error",
+                    "solid_displacement_round_trip_residual",
+                    "solid_displacement_round_trip_relative_error",
                     "geometry_transfer_apply_time",
                     "solid_solve_time",
                     "solid_io_time",
@@ -461,6 +465,18 @@ class VarFlExICoupler:
                     force_transfer_data, "force_transfer_relative_error"
                 )
                 force_transfer_apply_time = optional_float(force_transfer_data, "force_transfer_apply_time")
+                fluid_force_round_trip_residual = optional_float(
+                    force_transfer_data, "fluid_force_round_trip_residual"
+                )
+                fluid_force_round_trip_relative_error = optional_float(
+                    force_transfer_data, "fluid_force_round_trip_relative_error"
+                )
+                solid_displacement_round_trip_residual = optional_float(
+                    force_transfer_data, "solid_displacement_round_trip_residual"
+                )
+                solid_displacement_round_trip_relative_error = optional_float(
+                    force_transfer_data, "solid_displacement_round_trip_relative_error"
+                )
                 geometry_transfer_apply_time = optional_float(geo_data, "geometry_transfer_apply_time")
                 solid_solve_time = optional_float(geo_data, "solid_solve_time")
                 solid_io_time = optional_float(geo_data, "solid_io_time")
@@ -487,6 +503,10 @@ class VarFlExICoupler:
                         "force_transfer_residual": force_transfer_residual,
                         "force_transfer_relative_error": force_transfer_relative_error,
                         "force_transfer_apply_time": force_transfer_apply_time,
+                        "fluid_force_round_trip_residual": fluid_force_round_trip_residual,
+                        "fluid_force_round_trip_relative_error": fluid_force_round_trip_relative_error,
+                        "solid_displacement_round_trip_residual": solid_displacement_round_trip_residual,
+                        "solid_displacement_round_trip_relative_error": solid_displacement_round_trip_relative_error,
                         "geometry_transfer_apply_time": geometry_transfer_apply_time,
                         "solid_solve_time": solid_solve_time,
                         "solid_io_time": solid_io_time,
@@ -527,6 +547,10 @@ class VarFlExICoupler:
                         f"{force_transfer_residual:.6e}" if force_transfer_residual == force_transfer_residual else "nan",
                         f"{force_transfer_relative_error:.6e}" if force_transfer_relative_error == force_transfer_relative_error else "nan",
                         f"{force_transfer_apply_time:.6e}" if force_transfer_apply_time == force_transfer_apply_time else "nan",
+                        f"{fluid_force_round_trip_residual:.6e}" if fluid_force_round_trip_residual == fluid_force_round_trip_residual else "nan",
+                        f"{fluid_force_round_trip_relative_error:.6e}" if fluid_force_round_trip_relative_error == fluid_force_round_trip_relative_error else "nan",
+                        f"{solid_displacement_round_trip_residual:.6e}" if solid_displacement_round_trip_residual == solid_displacement_round_trip_residual else "nan",
+                        f"{solid_displacement_round_trip_relative_error:.6e}" if solid_displacement_round_trip_relative_error == solid_displacement_round_trip_relative_error else "nan",
                         f"{geometry_transfer_apply_time:.6e}" if geometry_transfer_apply_time == geometry_transfer_apply_time else "nan",
                         f"{solid_solve_time:.6e}" if solid_solve_time == solid_solve_time else "nan",
                         f"{solid_io_time:.6e}" if solid_io_time == solid_io_time else "nan",

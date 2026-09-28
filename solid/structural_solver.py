@@ -318,6 +318,8 @@ class StructuralSolver:
         self.force_transfer_residuals = np.full((self.Nsteps,), np.nan, dtype=float)
         self.force_transfer_relative_errors = np.full((self.Nsteps,), np.nan, dtype=float)
         self.force_transfer_apply_times = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.displacement_transfer_residuals = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.displacement_transfer_relative_errors = np.full((self.Nsteps,), np.nan, dtype=float)
         self.geometry_transfer_apply_times = np.full((self.Nsteps,), np.nan, dtype=float)
         self.solid_solve_times = np.full((self.Nsteps,), np.nan, dtype=float)
         self.solid_io_times = np.full((self.Nsteps,), np.nan, dtype=float)
@@ -451,17 +453,26 @@ class StructuralSolver:
             )
             self.force_transfer_residuals[i_step] = force_transfer_residual
             self.force_transfer_relative_errors[i_step] = force_transfer_relative_error
+            interface_disp_prev = self.transfer.get_nodal_displacements_plate(
+                self.model.q_old,
+                self.interface_node_ids,
+                self.dofs_u_x,
+                self.dofs_u_y,
+                self.dofs_w,
+            )
+            (
+                displacement_transfer_residual,
+                displacement_transfer_relative_error,
+                _solid_displacement_round_trip,
+            ) = self.transfer.displacement_transfer_metrics(
+                interface_disp_prev, epsilon_reg=self.epsilon_reg
+            )
+            self.displacement_transfer_residuals[i_step] = displacement_transfer_residual
+            self.displacement_transfer_relative_errors[i_step] = displacement_transfer_relative_error
             geometry_work_Wf = float("nan")
             geometry_work_Ws = float("nan")
             geometry_work_rel_error = float("nan")
             if self.work_conservative_mode and nodal_forces is not None:
-                interface_disp_prev = self.transfer.get_nodal_displacements_plate(
-                    self.model.q_old,
-                    self.interface_node_ids,
-                    self.dofs_u_x,
-                    self.dofs_u_y,
-                    self.dofs_w,
-                )
                 u_le_prev, u_te_prev, _u_common_prev, _u_geom_prev = self.transfer.apply_geometry_transfer(
                     self.model.q_old,
                     fallback_tree=self.interface_tree,
@@ -482,6 +493,10 @@ class StructuralSolver:
                 "force_transfer_residual": force_transfer_residual,
                 "force_transfer_relative_error": force_transfer_relative_error,
                 "force_transfer_apply_time": force_transfer_apply_time,
+                "fluid_force_round_trip_residual": force_transfer_residual,
+                "fluid_force_round_trip_relative_error": force_transfer_relative_error,
+                "solid_displacement_round_trip_residual": displacement_transfer_residual,
+                "solid_displacement_round_trip_relative_error": displacement_transfer_relative_error,
                 "crm_setup_time": self.transfer.crm_setup_time,
                 "rbf_setup_time": self.transfer.rbf_setup_time,
                 "geometry_rbf_setup_time": self.transfer.geometry_rbf_setup_time,
@@ -699,6 +714,8 @@ class StructuralSolver:
                 "geometry_work_Wf,geometry_work_Ws,geometry_work_rel_error,"
                 "force_residual,force_reference_norm,force_relative_error,"
                 "force_transfer_residual,force_transfer_relative_error,force_transfer_apply_time,"
+                "fluid_force_round_trip_residual,fluid_force_round_trip_relative_error,"
+                "solid_displacement_round_trip_residual,solid_displacement_round_trip_relative_error,"
                 "geometry_residual,geometry_reference_norm,geometry_relative_error,geometry_transfer_apply_time,"
                 "solid_solve_time,solid_io_time,step_walltime\n"
             )
@@ -723,6 +740,10 @@ class StructuralSolver:
                     f"{self.force_transfer_residuals[k_idx]:.12e},"
                     f"{self.force_transfer_relative_errors[k_idx]:.12e},"
                     f"{self.force_transfer_apply_times[k_idx]:.12e},"
+                    f"{self.force_transfer_residuals[k_idx]:.12e},"
+                    f"{self.force_transfer_relative_errors[k_idx]:.12e},"
+                    f"{self.displacement_transfer_residuals[k_idx]:.12e},"
+                    f"{self.displacement_transfer_relative_errors[k_idx]:.12e},"
                     f"{self.geometry_residuals[k_idx]:.12e},"
                     f"{self.geometry_reference_norms[k_idx]:.12e},"
                     f"{self.geometry_relative_errors[k_idx]:.12e},"
