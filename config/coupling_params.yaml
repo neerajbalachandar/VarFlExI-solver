@@ -1,25 +1,36 @@
-total_time: 1.0
-n_steps: 1000
+
+total_time: 1.5
+n_steps: 3000
+
 host: 127.0.0.1
 port: 9000
+
 comm_nspan: 80
 comm_nchord: 1
+
 work_conservative_mode: true
 work_conservation_mode: true
-span_sampling_mode: node-stride
+
+span_sampling_mode: midpoint
 custom_span_stride: null
-force_transfer_mode: rbf
-rbf_radius: 0.08
+
+force_transfer_mode: crm
+rbf_radius: 0.03
 rbf_neighbors: 24
-max_abs_force_component: 5.0e3
+max_abs_force_component: 100.0
+
 enforce_chord_projection: false
 enforce_span_projection: false
+
 force_relax: 1.0
 geom_relax: 1.0
 epsilon_reg: 1.0e-16
+
 debug_io: null
 payload_indexing: null
+
 send_cp: true
 send_le: true
 send_te: true
-results_root: results/dt_0.001_fig_reversetransfer/
+
+results_root: results/rect_linear_regime/

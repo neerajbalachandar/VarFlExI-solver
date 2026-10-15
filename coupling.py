@@ -78,12 +78,19 @@ while fluid_conn is None or solid_conn is None:
 print("Both participants connected.")
 
 repo_root = os.path.dirname(os.path.abspath(__file__))
-results_dir = os.path.join(repo_root, "results", "results_KG9_inflex", "coupling")
+results_dir = os.path.join(repo_root, "results", "results_tipdisp_inflex_ramp1", "coupling")
 os.makedirs(results_dir, exist_ok=True)
 log_csv = os.path.join(results_dir, "coupling_history.csv")
 log_fp = open(log_csv, "w", newline="")
 writer = csv.writer(log_fp)
-writer.writerow(["step", "n_forces", "force_relax_used", "force_residual", "sample_fx", "sample_fy", "sample_fz"])
+force_component_fields = [
+    "lift_kj", "drag_kj", "lift_unsteady_circulation", "drag_unsteady_circulation",
+    "lift_parasitic_polar", "drag_parasitic_polar",
+]
+writer.writerow([
+    "step", "n_forces", "force_relax_used", "force_residual",
+    "sample_fx", "sample_fy", "sample_fz", *force_component_fields,
+])
 forces_jsonl = os.path.join(results_dir, "forces_sent_received_history.jsonl")
 forces_fp = open(forces_jsonl, "w")
 
@@ -202,6 +209,9 @@ for step in range(1, NSTEPS + 1):
     
     print("Forces received.")
     forces = force_data.get("force", [])
+    force_components = {
+        key: float(force_data.get(key, 0.0)) for key in force_component_fields
+    }
 
     if not isinstance(forces, list):
         raise RuntimeError(f"Fluid sent invalid force payload at step {step}")
@@ -281,6 +291,7 @@ for step in range(1, NSTEPS + 1):
             "force_residual": force_residual,
             "force_received": forces_received_raw,
             "force_sent": forces_sent,
+            "force_components": force_components,
         },
         forces_fp,
     )
@@ -294,6 +305,7 @@ for step in range(1, NSTEPS + 1):
         f"{float(forces[0][0]):.6e}",
         f"{float(forces[0][1]):.6e}",
         f"{float(forces[0][2]):.6e}",
+        *[f"{force_components[key]:.6e}" for key in force_component_fields],
     ])
 
     # 4. Send forces to solid

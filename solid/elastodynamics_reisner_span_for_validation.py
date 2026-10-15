@@ -220,7 +220,7 @@ a_old = Function(V)
 Uinf = 0.30
 chord = 0.1
 
-kG = 1.90
+kG = 1.82 # Should have been 1.82 for the validation first plot of tip displacement against time.
 
 freq = kG * Uinf / (np.pi * chord)
 
@@ -243,7 +243,7 @@ u_zero_2d = Constant((0.0, 0.0))
 #     degree=2
 # )
 
-Tramp = 3.0 / freq     # one oscillation period
+Tramp = 1.0 / freq     # one oscillation period - 1/freq, 3/freq, 5/freq
 
 heave_expr = Expression(
     """
@@ -867,7 +867,7 @@ def get_nodal_displacements_plate(q_fun, node_ids, dofs_u_x, dofs_u_y, dofs_w):
 sig = Function(Vsig, name="MembraneStress")
 
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-out_dir = os.path.join(repo_root, "results", "results_KG9_inflex", "solid")
+out_dir = os.path.join(repo_root, "results", "results_tipdisp_inflex_ramp1", "solid")
 os.makedirs(out_dir, exist_ok=True)
 
 # =====================================================================
@@ -963,6 +963,12 @@ diag_writer.writerow([
     # Forces
     # -----------------------------
     "ForceNorm",
+    "Fluid_KJ_Lift",
+    "Fluid_KJ_Drag",
+    "Fluid_UnsteadyCirculation_Lift",
+    "Fluid_UnsteadyCirculation_Drag",
+    "Fluid_ParasiticPolar_Lift",
+    "Fluid_ParasiticPolar_Drag",
 
     # -----------------------------
     # CPU
@@ -1237,6 +1243,17 @@ for i_step in range(Nsteps):
     forces, used_structured_force = parse_force_payload(
         data, n_span_comm, n_chord_comm, eta_span_comm, eta_cp_comm
     )
+    force_component_values = [
+        float(data.get(name, 0.0))
+        for name in (
+            "lift_kj",
+            "drag_kj",
+            "lift_unsteady_circulation",
+            "drag_unsteady_circulation",
+            "lift_parasitic_polar",
+            "drag_parasitic_polar",
+        )
+    ]
     if not np.isfinite(forces).all():
         raise RuntimeError(f"Non-finite force data at solid step {i_step + 1}")
 
@@ -1547,6 +1564,7 @@ for i_step in range(Nsteps):
         newton_residual[i_step+1],
 
         force_norm[i_step+1],
+        *force_component_values,
 
         simulation_walltime
 

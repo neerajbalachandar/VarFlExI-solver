@@ -1,27 +1,36 @@
-span: 0.8
-root_chord: 0.12
-tip_chord: 0.12
-thickness_ratio: 0.12
+
+span: 0.96
+root_chord: 0.24
+tip_chord: 0.24
+thickness_ratio: 0.08
 leading_edge_sweep: 0.0
-nx: 10
-ny: 60
-results_root: results/dt_0.001_fig_reversetransfer/
-output_dir: solid/v18_reissner_mindlin_plate
-output_run_name: v18_reissner_mindlin_plate
+
+nx: 30
+ny: 160
+
+results_root: results/rect_linear_regime/
+output_dir: solid/
+output_run_name: rect_linear_regime
+
 xdmf_filename: elastodynamics-results.xdmf
 mesh_pvd_filename: solid_mesh.pvd
 q_pvd_filename: plate_state.pvd
 sig_pvd_filename: membrane_stress.pvd
 diag_csv_filename: solid_v18_diagnostics.csv
-E: 3.0e10
-nu: 0.35
-rho_s: 1600.0
-eta_m: 0.8
-eta_k: 0.0001
+
+E: 3.0e9
+nu: 0.30
+rho_s: 1200.0
+
+eta_m: 1.2
+eta_k: 5.0e-5
 kappa_shear: 0.833
+
 alpha_m: 0.1
 alpha_f: 0.2
-newton_atol: 0.0002
-newton_rtol: 0.003
-newton_maxiter: 60
-force_ramp_iters: 8
+
+newton_atol: 1.0e-8
+newton_rtol: 1.0e-6
+newton_maxiter: 20
+
+force_ramp_iters: 1

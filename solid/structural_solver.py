@@ -315,6 +315,7 @@ class StructuralSolver:
         self.force_residuals = np.full((self.Nsteps,), np.nan, dtype=float)
         self.force_reference_norms = np.full((self.Nsteps,), np.nan, dtype=float)
         self.force_relative_errors = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.aero_force_components = np.full((self.Nsteps, 6), np.nan, dtype=float)
         self.force_transfer_residuals = np.full((self.Nsteps,), np.nan, dtype=float)
         self.force_transfer_relative_errors = np.full((self.Nsteps,), np.nan, dtype=float)
         self.force_transfer_apply_times = np.full((self.Nsteps,), np.nan, dtype=float)
@@ -409,6 +410,14 @@ class StructuralSolver:
             self.force_residuals[i_step] = optional_float(data, "force_residual")
             self.force_reference_norms[i_step] = optional_float(data, "force_reference_norm")
             self.force_relative_errors[i_step] = optional_float(data, "force_relative_error")
+            self.aero_force_components[i_step, :] = [
+                optional_float(data, name)
+                for name in (
+                    "lift_kj", "drag_kj", "lift_unsteady_circulation",
+                    "drag_unsteady_circulation", "lift_parasitic_polar",
+                    "drag_parasitic_polar",
+                )
+            ]
             forces, used_structured_force = self.transfer.parse_force_payload(
                 data, len(self.eta_span_comm), 1, self.eta_span_comm, self.eta_cp_comm
             )
@@ -717,7 +726,9 @@ class StructuralSolver:
                 "fluid_force_round_trip_residual,fluid_force_round_trip_relative_error,"
                 "solid_displacement_round_trip_residual,solid_displacement_round_trip_relative_error,"
                 "geometry_residual,geometry_reference_norm,geometry_relative_error,geometry_transfer_apply_time,"
-                "solid_solve_time,solid_io_time,step_walltime\n"
+                "solid_solve_time,solid_io_time,step_walltime,"
+                "lift_kj,drag_kj,lift_unsteady_circulation,drag_unsteady_circulation,"
+                "lift_parasitic_polar,drag_parasitic_polar\n"
             )
             for k_idx in range(self.Nsteps):
                 fp.write(
@@ -750,7 +761,9 @@ class StructuralSolver:
                     f"{self.geometry_transfer_apply_times[k_idx]:.12e},"
                     f"{self.solid_solve_times[k_idx]:.12e},"
                     f"{self.solid_io_times[k_idx]:.12e},"
-                    f"{self.step_walltime[k_idx]:.12e}\n"
+                    f"{self.step_walltime[k_idx]:.12e},"
+                    + ",".join(f"{value:.12e}" for value in self.aero_force_components[k_idx])
+                    + "\n"
                 )
 
 
