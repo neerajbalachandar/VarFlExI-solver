@@ -8,7 +8,6 @@ struct SolverConfig
     vinf::Float64
     rho::Float64
     nu::Float64
-    section_polar::String
 
     ttot::Float64
     nsteps::Int
@@ -46,6 +45,7 @@ struct SolverConfig
     nsteps_save::Int
     save_horseshoes::Bool
     save_geometry_csv::Bool
+    use_ftot_force::Bool
     debug_io::Bool
     regularize_vlm::Bool
     max_particles::Int
@@ -126,5 +126,7 @@ mutable struct RuntimeState
     force_trace_io
 
     step_ref
+
+    use_ftot_force
 
 end

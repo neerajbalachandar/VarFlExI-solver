@@ -52,7 +52,7 @@ if solver_cfg.regularize_vlm
 end
 
 println(
-        "Fluid config: AoA=$(AOA) deg, U=$(magVinf) m/s, rho=$(rho), nu=$(nu), span=$(span), " *
+    "Fluid config: AoA=$(AOA) deg, U=$(magVinf) m/s, rho=$(rho), nu=$(nu), span=$(span), " *
     "n_span=$(n_span), nsteps=$(nsteps), dt=$(dt), p_per_step=$(p_per_step)"
 )
 
@@ -131,38 +131,6 @@ vpm_fmm_settings = vpm.FMM(
 vpm_viscous = wake_cfg.viscous_scheme == "CoreSpreading" ?
               vpm.CoreSpreading(nu, sigma_vpm_overwrite, 1.0) :
               nothing
-
-previous_aero_state = deepcopy(wing)
-previous_aero_state.sol["Gamma"] = zeros(Float64, vlm.get_m(wing))
-kuttajoukowski_force = uns.generate_aerodynamicforce_kuttajoukowski(
-    "regular", nothing, nothing, false, nothing, nothing, nothing
-)
-parasitic_drag_force = nothing
-if !isempty(strip(solver_cfg.section_polar))
-    polar_path = isabspath(solver_cfg.section_polar) ? solver_cfg.section_polar :
-                 normpath(joinpath(final_dir, solver_cfg.section_polar))
-    isfile(polar_path) || error("Configured section_polar file does not exist: $(polar_path)")
-    polar_name = basename(polar_path)
-    polar_dir = dirname(polar_path)
-    polar_data = vlm.ap.read_polar(polar_name; path=polar_dir)
-    polar_re = Float64(vlm.ap.get_Re(polar_data))
-    mean_chord = 0.5 * (root_chord + tip_chord)
-    reference_re = magVinf * mean_chord / nu
-    if !isfinite(polar_re) || polar_re <= 0 || reference_re <= 0 ||
-       abs(log(polar_re / reference_re)) > log(2.0)
-        error(
-            "section_polar Reynolds number $(polar_re) must be within a factor of 2 " *
-            "of reference Re=$(reference_re) from vinf*mean_chord/nu. Configure a " *
-            "polar appropriate for this fluid and operating regime."
-        )
-    end
-    parasitic_drag_force = uns.generate_aerodynamicforce_parasiticdrag(
-        polar_name; read_path=polar_dir, add_skinfriction=true
-    )
-    println("Section polar enabled: $(polar_path), Re=$(polar_re)")
-else
-    println("No section_polar configured; parasitic polar drag is disabled.")
-end
 
 println(
     "Shedding config: spanwise-only wing, n_span=$(n_span), " *
@@ -261,8 +229,7 @@ if span_sampling_mode == "custom-stride" && haskey(msg0, "eta_span") && length(m
     assert_eta_close("Solid eta_span vs fluid coupling eta", eta_span_solid, eta_span_coupling; mode=span_sampling_mode)
 end
 apply_from_message!(msg0; first_step=true, step=0)
-previous_aero_state = deepcopy(wing)
-previous_aero_state.sol["Gamma"] = zeros(Float64, m_span)
 
 step_ref = Ref(0)
+use_ftot_force = Ref(solver_cfg.use_ftot_force)
 runtime_pipeline = uns.concatenate(wake_treatment, coupling_runtime_function)

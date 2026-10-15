@@ -352,12 +352,6 @@ class VarFlExICoupler:
                     "cd",
                     "solid_step_time",
                     "fluid_step_time",
-                    "lift_kj",
-                    "drag_kj",
-                    "lift_unsteady_circulation",
-                    "drag_unsteady_circulation",
-                    "lift_parasitic_polar",
-                    "drag_parasitic_polar",
                 ]
             )
 
@@ -415,14 +409,6 @@ class VarFlExICoupler:
                 cl, cd = force_coefficients(relaxed_forces, q_inf, ref_area)
                 lift, drag = force_components(relaxed_forces)
                 fluid_step_time = optional_float(force_data, "fluid_step_time")
-                aero_force_components = {
-                    key: optional_float(force_data, key)
-                    for key in (
-                        "lift_kj", "drag_kj", "lift_unsteady_circulation",
-                        "drag_unsteady_circulation", "lift_parasitic_polar",
-                        "drag_parasitic_polar",
-                    )
-                }
                 force_data["lift"] = lift
                 force_data["drag"] = drag
                 force_data["cl"] = cl
@@ -543,7 +529,6 @@ class VarFlExICoupler:
                         "cd": cd,
                         "solid_step_time": solid_step_time,
                         "fluid_step_time": fluid_step_time,
-                        "force_components": aero_force_components,
                     },
                     history_fp,
                 )
@@ -589,10 +574,6 @@ class VarFlExICoupler:
                         f"{float(cd):.6e}" if cd == cd else "nan",
                         f"{solid_step_time:.6e}" if solid_step_time == solid_step_time else "nan",
                         f"{fluid_step_time:.6e}" if fluid_step_time == fluid_step_time else "nan",
-                        *[
-                            f"{value:.6e}" if value == value else "nan"
-                            for value in aero_force_components.values()
-                        ],
                     ]
                 )
 

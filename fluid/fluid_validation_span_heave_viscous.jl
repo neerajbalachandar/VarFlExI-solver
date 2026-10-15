@@ -4,8 +4,6 @@ using LinearAlgebra
 import FLOWUnsteady as uns
 import FLOWVLM as vlm
 import FLOWVPM as vpm
-
-include(joinpath(@__DIR__, "src", "aero_force_utils.jl"))
 using Dates
 using Statistics
 
@@ -135,8 +133,7 @@ magVinf = parse(Float64, get(ENV, "FLUID_VINF", "0.30"))
 rho = parse(Float64, get(ENV, "FLUID_RHO", "998"))
 DEBUG_IO = lowercase(get(ENV, "COUPLING_DEBUG_IO", "0")) ∉ ("0", "false", "no")
 
-nu = parse(Float64, get(ENV, "FLUID_NU", "1.0e-3"))
-section_polar = strip(get(ENV, "FLUID_SECTION_POLAR", ""))
+nu = parse(Float64, get(ENV, "FLUID_NU", "1.0e-6"))
 
 # Match solid coordinate system: x=chord, y=span, z=normal displacement.
 span = parse(Float64, get(ENV, "WING_SPAN", "0.3"))
@@ -259,31 +256,6 @@ wing = make_cantilever_template(
 )
 wing_ref = deepcopy(wing)
 
-previous_aero_state = deepcopy(wing)
-previous_aero_state.sol["Gamma"] = zeros(Float64, vlm.get_m(wing))
-kuttajoukowski_force = uns.generate_aerodynamicforce_kuttajoukowski(
-    "regular", nothing, nothing, false, nothing, nothing, nothing
-)
-parasitic_drag_force = nothing
-if !isempty(section_polar)
-    polar_path = isabspath(section_polar) ? section_polar : normpath(joinpath(@__DIR__, "..", section_polar))
-    isfile(polar_path) || error("Configured FLUID_SECTION_POLAR file does not exist: $(polar_path)")
-    polar_name, polar_dir = basename(polar_path), dirname(polar_path)
-    polar_data = vlm.ap.read_polar(polar_name; path=polar_dir)
-    polar_re = Float64(vlm.ap.get_Re(polar_data))
-    reference_re = magVinf * 0.5 * (root_chord + tip_chord) / nu
-    if !isfinite(polar_re) || polar_re <= 0 || reference_re <= 0 ||
-       abs(log(polar_re / reference_re)) > log(2.0)
-        error("Section polar Re=$(polar_re) must be within a factor of 2 of operating Re=$(reference_re)")
-    end
-    parasitic_drag_force = uns.generate_aerodynamicforce_parasiticdrag(
-        polar_name; read_path=polar_dir, add_skinfriction=true
-    )
-    println("Section polar enabled: $(polar_path), Re=$(polar_re)")
-else
-    println("No FLUID_SECTION_POLAR configured; parasitic polar drag is disabled.")
-end
-
 system = vlm.WingSystem()
 vlm.addwing(system, "Wing", wing)
 vehicle = uns.VLMVehicle(system; vlm_system=system, wake_system=system)
@@ -304,8 +276,8 @@ simulation = uns.Simulation(
 )
 
 repo_root = normpath(joinpath(@__DIR__, ".."))
-save_path = normpath(joinpath(repo_root, "results", "results_tipdisp_inflex_ramp1", "fluid"))
-run_name = "fluid_val_ramp1"
+save_path = normpath(joinpath(repo_root, "results", "results_KG9_inflex", "fluid"))
+run_name = "fluid_val_2"
 mkpath(save_path)
 
 # max_particles = Int((nsteps + 1) * (vlm.get_m(vehicle.vlm_system) * (p_per_step + 1) + p_per_step))
@@ -553,6 +525,19 @@ function safe_row_vec(sol::Dict{String, Any}, key::String, i::Int)
     return vv
 end
 
+function fallback_relative_velocity(wing, i::Int, T::Float64)
+    Xcp = [wing._xm[i], wing._ym[i], wing._zm[i]]
+    Vrel = copy(Vinf(Xcp, T))
+    Vind = safe_row_vec(wing.sol, "Vind", i)
+    Vvpm = safe_row_vec(wing.sol, "Vvpm", i)
+    Vkin = safe_row_vec(wing.sol, "Vkin", i)
+    Vind !== nothing && (Vrel .+= Vind)
+    Vvpm !== nothing && (Vrel .+= Vvpm)
+    Vkin !== nothing && (Vrel .-= Vkin)
+    return Vrel
+end
+
+
 # ------------------------------ SOCKET SETUP ---------------------------------
 println("Connecting to coupling server...")
 sock = connect(get(ENV, "COUPLING_HOST", "127.0.0.1"), parse(Int, get(ENV, "COUPLING_PORT", "9000")))
@@ -575,11 +560,6 @@ eta_chord_force = [eta_cp]
 u_prev_cp = zeros(Float64, m_span, 3)
 omega_prev_cp = zeros(Float64, m_span, 3)
 forces_prev = zeros(Float64, m_span, 3)
-wing_cp_prev = nothing
-wing_cp_prev2 = nothing
-force_kj = zeros(Float64, m_span, 3)
-force_unsteady_circulation = zeros(Float64, m_span, 3)
-force_parasitic_polar = zeros(Float64, m_span, 3)
 
 r_vortex_ref = zeros(Float64, m_span, 3)
 r_le_ref = zeros(Float64, m_span, 3)
@@ -645,10 +625,10 @@ diag_file = joinpath(save_path, run_name * "_fluid_diagnostics.csv")
 diag_io = open(diag_file, "w")
 
 println(diag_io,
-"step,time,nParticles,lift,drag,
-lift_kj,drag_kj,lift_unsteady_circulation,drag_unsteady_circulation,
-lift_parasitic_polar,drag_parasitic_polar,
-forceNorm,Ct,gammaMax,gammaMean,force_residual,geometry_residual,
+"step,time,nParticles,lift,drag,moment,
+forceNorm,
+gammaMax,gammaMean,
+sigmaMax,sigmaMean,
 cpuTime")
 
 # ---------------- VALIDATION HISTORY ----------------
@@ -771,10 +751,9 @@ if span_sampling_mode == "custom-stride" && haskey(msg0, "eta_span") && length(m
     assert_eta_close("Solid eta_span vs fluid coupling eta", eta_span_solid, eta_span_coupling)
 end
 apply_from_message!(msg0; first_step=true, step=0)
-previous_aero_state = deepcopy(wing)
-previous_aero_state.sol["Gamma"] = zeros(Float64, m_span)
 
 step_ref = Ref(0)
+use_ftot_force = Ref(true)
 
 function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
 
@@ -785,7 +764,6 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
 
     ensure_gamma!(wing, m_span)
     gamma_w = wing.sol["Gamma"]
-    all(isfinite, gamma_w) || error("FLOWUnsteady produced non-finite circulation at step $(step)")
 
     gammaMax = maximum(abs.(gamma_w))
     gammaMean = mean(abs.(gamma_w))
@@ -795,30 +773,18 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     force_out = Vector{Vector{Float64}}(undef, m_span)
     prev_snapshot = copy(forces_prev)
 
-    pop!(wing.sol, "Ftot", nothing)
-    wing.Vinf === nothing && error("FLOWVLM freestream is unset at aerodynamic force evaluation")
-    previous_aero_state.Vinf = wing.Vinf
-    ensure_kj_vpm_velocity_fields!(wing, PFIELD, DT)
-    force_kj_rows = kuttajoukowski_force(wing, previous_aero_state, PFIELD, Vinf, DT, rho; t=T)
-    for i in 1:m_span
-        force_kj[i, :] .= Float64.(force_kj_rows[i])
-    end
-    total_with_unsteady = uns.calc_aerodynamicforce_unsteady(
-        wing, previous_aero_state, PFIELD, Vinf, DT, rho; t=T, add_to_Ftot=true
-    )
-    for i in 1:m_span
-        force_unsteady_circulation[i, :] .= Float64.(total_with_unsteady[i]) .- force_kj[i, :]
-    end
-    if parasitic_drag_force !== nothing
-        total_force_rows = parasitic_drag_force(
-            wing, previous_aero_state, PFIELD, Vinf, DT, rho; t=T
-        )
-        for i in 1:m_span
-            force_parasitic_polar[i, :] .= Float64.(total_force_rows[i]) .- Float64.(total_with_unsteady[i])
+    frow = nothing
+    if use_ftot_force[]
+        try
+            # FLOWVLM force postprocessing can fail for some wing layouts/types.
+            # When it does, keep the coupling stable by permanently falling back
+            # to Gamma-based force (KJ) rather than warning every step.
+            vlm.calculate_field(wing, "Ftot"; rhoinf=rho, t=T)
+            haskey(wing.sol, "Ftot") && (frow = wing.sol["Ftot"])
+        catch err
+            use_ftot_force[] = false
+            @warn "Disabling Ftot-based force extraction; falling back to Gamma-based force. Root cause: $(sprint(showerror, err))"
         end
-    else
-        fill!(force_parasitic_polar, 0.0)
-        total_force_rows = total_with_unsteady
     end
 
     for i in 1:m_span
@@ -826,9 +792,23 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         isfinite(γ) || (γ = 0.0)
         gamma_w[i] = γ
 
-        force_row = total_force_rows[i]
-        all(isfinite, force_row) || error("Non-finite FLOWUnsteady force at panel $(i), step $(step)")
-        fx_raw, fy_raw, fz_raw = Float64(force_row[1]), Float64(force_row[2]), Float64(force_row[3])
+        fx_raw, fy_raw, fz_raw = 0.0, 0.0, 0.0
+        if frow != nothing && i <= length(frow)
+            fi = frow[i]
+            if length(fi) == 3 && all(isfinite, fi)
+                fx_raw, fy_raw, fz_raw = Float64(fi[1]), Float64(fi[2]), Float64(fi[3])
+            else
+                Vloc = fallback_relative_velocity(wing, i, T)
+                lvec = [wing._xn[i + 1] - wing._xn[i], wing._yn[i + 1] - wing._yn[i], wing._zn[i + 1] - wing._zn[i]]
+                Fkj = rho * γ * cross(Vloc, lvec)
+                fx_raw, fy_raw, fz_raw = Fkj[1], Fkj[2], Fkj[3]
+            end
+        else
+            Vloc = fallback_relative_velocity(wing, i, T)
+            lvec = [wing._xn[i + 1] - wing._xn[i], wing._yn[i + 1] - wing._yn[i], wing._zn[i + 1] - wing._zn[i]]
+            Fkj = rho * γ * cross(Vloc, lvec)
+            fx_raw, fy_raw, fz_raw = Fkj[1], Fkj[2], Fkj[3]
+        end
 
         fx = force_relax * fx_raw + (1 - force_relax) * forces_prev[i, 1]
         fy = force_relax * fy_raw + (1 - force_relax) * forces_prev[i, 2]
@@ -839,9 +819,6 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         forces_prev[i, 3] = fz
         force_out[i] = [fx, fy, fz]
     end
-
-    global previous_aero_state
-    previous_aero_state = deepcopy(wing)
 
     # -------------------------------------------------
         # TOTAL THRUST
@@ -869,12 +846,6 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     lift = sum(force_mat[:,3])
 
     drag = -sum(force_mat[:,1])
-    lift_kj = sum(force_kj[:, 3])
-    drag_kj = -sum(force_kj[:, 1])
-    lift_unsteady_circulation = sum(force_unsteady_circulation[:, 3])
-    drag_unsteady_circulation = -sum(force_unsteady_circulation[:, 1])
-    lift_parasitic_polar = sum(force_parasitic_polar[:, 3])
-    drag_parasitic_polar = -sum(force_parasitic_polar[:, 1])
     
     forceNorm = norm(force_mat)
 
@@ -891,15 +862,6 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
                 "n_chord" => 1,
                 "indexing" => "span-major",
                 "force" => force_out,
-                "force_kj" => force_kj,
-                "force_unsteady_circulation" => force_unsteady_circulation,
-                "force_parasitic_polar" => force_parasitic_polar,
-                "lift_kj" => lift_kj,
-                "drag_kj" => drag_kj,
-                "lift_unsteady_circulation" => lift_unsteady_circulation,
-                "drag_unsteady_circulation" => drag_unsteady_circulation,
-                "lift_parasitic_polar" => lift_parasitic_polar,
-                "drag_parasitic_polar" => drag_parasitic_polar,
                 "particles" => np,
             )),
         )
@@ -917,15 +879,6 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         "eta_span" => eta_span_force_payload,
         "eta_chord" => eta_chord_force,
         "force" => force_out,
-        "force_kj" => force_kj,
-        "force_unsteady_circulation" => force_unsteady_circulation,
-        "force_parasitic_polar" => force_parasitic_polar,
-        "lift_kj" => lift_kj,
-        "drag_kj" => drag_kj,
-        "lift_unsteady_circulation" => lift_unsteady_circulation,
-        "drag_unsteady_circulation" => drag_unsteady_circulation,
-        "lift_parasitic_polar" => lift_parasitic_polar,
-        "drag_parasitic_polar" => drag_parasitic_polar,
     )) * "\n")
     flush(sock)
 
@@ -965,12 +918,6 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
             np,",",
             lift,",",
             drag,",",
-            lift_kj,",",
-            drag_kj,",",
-            lift_unsteady_circulation,",",
-            drag_unsteady_circulation,",",
-            lift_parasitic_polar,",",
-            drag_parasitic_polar,",",
             forceNorm,",",
             Ct,",",
             gammaMax,",",
