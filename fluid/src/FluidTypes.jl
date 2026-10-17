@@ -53,6 +53,7 @@ struct SolverConfig
     section_polar_path::String
     freestream_gradient::Vector{Float64}
     freestream_oscillation::Vector{Float64}
+    freestream_wavenumber::Vector{Float64}
     freestream_frequency::Float64
     freestream_phase::Float64
     freestream_reference::Vector{Float64}

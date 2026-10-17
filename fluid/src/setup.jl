@@ -47,18 +47,30 @@ custom_span_stride = coupling_cfg.custom_stride
 
 length(solver_cfg.freestream_gradient) == 9 || error("freestream_gradient must have 9 row-major values")
 length(solver_cfg.freestream_oscillation) == 3 || error("freestream_oscillation must have 3 components")
+length(solver_cfg.freestream_wavenumber) == 3 || error("freestream_wavenumber must have 3 components")
 length(solver_cfg.freestream_reference) == 3 || error("freestream_reference must have 3 components")
 freestream_base = magVinf * [cosd(AOA), 0.0, sind(AOA)]
 freestream_gradient = permutedims(reshape(solver_cfg.freestream_gradient, 3, 3))
 freestream_amplitude = solver_cfg.freestream_oscillation
+freestream_wavenumber = solver_cfg.freestream_wavenumber
 freestream_reference = solver_cfg.freestream_reference
 freestream_frequency = solver_cfg.freestream_frequency
 freestream_phase = solver_cfg.freestream_phase
-Vinf(X, t) = freestream_base + freestream_gradient * (X .- freestream_reference) +
-             freestream_amplitude .* sin(2pi * freestream_frequency * t + freestream_phase)
+polar_label = isempty(solver_cfg.section_polar) ? "disabled" : solver_cfg.section_polar
+function Vinf(X, t)
+    x, y, z = X .- freestream_reference
+    kx, ky, kz = freestream_wavenumber
+    # Cyclic transverse modes keep this synthetic gust divergence-free.
+    phase = 2pi * freestream_frequency * t + freestream_phase
+    gust = freestream_amplitude .* sin.(phase .+ [ky * y, kz * z, kx * x])
+    return freestream_base + freestream_gradient * (X .- freestream_reference) + gust
+end
 
 if any(x -> !iszero(x), freestream_gradient)
-    @warn "Spatial freestream gradient is active for VLM force evaluation; this FLOWVPM version advects wake particles using Uinf(t) sampled at a reference point, so wake convection does not resolve spatial gradients."
+    @warn "Spatial freestream gradient is active for VLM force evaluation; this FLOWVPM version advects wake particles using Uinf(t) sampled at the global origin, so wake convection does not resolve spatial gradients."
+end
+if any(x -> !iszero(x), freestream_amplitude)
+    @warn "Synthetic spatial-temporal gust enabled. FLOWVPM advects wake particles with the gust sampled at the global origin; wake convection does not resolve spatial gust variation. This is a prescribed gust, not resolved turbulence/LES."
 end
 
 if solver_cfg.regularize_vlm
@@ -68,7 +80,7 @@ end
 println(
     "Fluid config: AoA=$(AOA) deg, U=$(magVinf) m/s, rho=$(rho), nu=$(nu), span=$(span), " *
     "n_span=$(n_span), nsteps=$(nsteps), dt=$(dt), p_per_step=$(p_per_step), " *
-    "polar=$(isempty(solver_cfg.section_polar) ? \"disabled\" : solver_cfg.section_polar), " *
+    "polar=$(polar_label), " *
     "shed_boundarylayer=$(solver_cfg.shed_boundarylayer)"
 )
 

@@ -8,11 +8,13 @@ vinf: 15.0
 rho: 1.225
 nu: 1.5e-05
 
-# V(x,t) = V0 + G*(x-x_ref) + A*sin(2*pi*f*t + phase).
-# G is row-major (3x3); zero values retain uniform freestream.
+# V(x,t) = V0 + G*(x-x_ref) + cyclic transverse sinusoidal gust.
+# Gust amplitudes are m/s, wavenumbers are rad/m; this deterministic gust is
+# not a substitute for resolved turbulence or an LES inflow.
 freestream_gradient: [0, 0, 0, 0, 0, 0, 0, 0, 0]
-freestream_oscillation: [0, 0, 0]
-freestream_frequency_hz: 0.0
+freestream_oscillation: [0.30, 0.20, 0.15]
+freestream_wavenumber: [2.0, 1.5, 1.0]
+freestream_frequency_hz: 0.7
 freestream_phase_deg: 0.0
 freestream_reference: [0, 0, 0]
 

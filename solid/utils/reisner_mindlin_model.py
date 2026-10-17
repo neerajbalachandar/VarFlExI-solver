@@ -130,7 +130,7 @@ class ReissnerMindlinModel:
         grad_w = grad(w)
         return self.membrane_strain(u_mem) + 0.5 * outer(grad_w, grad_w)
 
-    def nonlinear_membrane_variation(self, w, delta_w, delta_u):
+    def nonlinear_membrane_variation(self, u_mem, w, delta_u, delta_w):
         """Consistent virtual von Karman membrane strain.
 
         The transverse part contains the current ``w`` and virtual ``delta_w``;

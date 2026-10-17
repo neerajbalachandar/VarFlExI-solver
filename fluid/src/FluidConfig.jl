@@ -133,6 +133,7 @@ function load_configs(fluid_path::AbstractString, solid_path::AbstractString, co
         as_string(fluid, "section_polar_path", ""),
         Float64.(get(fluid, "freestream_gradient", zeros(9))),
         Float64.(get(fluid, "freestream_oscillation", zeros(3))),
+        Float64.(get(fluid, "freestream_wavenumber", zeros(3))),
         as_float(fluid, "freestream_frequency_hz", 0.0),
         deg2rad(as_float(fluid, "freestream_phase_deg", 0.0)),
         Float64.(get(fluid, "freestream_reference", zeros(3))),
