@@ -308,6 +308,9 @@ class StructuralSolver:
     def _setup_history(self):
         self.time = np.linspace(0.0, self.T, self.Nsteps + 1)
         self.u_tip = np.zeros((self.Nsteps + 1,), dtype=float)
+        self.surface_strain_percent = np.zeros((self.Nsteps,), dtype=float)
+        self.strain_increase_percentage_points = np.zeros((self.Nsteps,), dtype=float)
+        self.initial_surface_strain_rms = self.model.compute_surface_strain_rms()
         self.energies = np.zeros((self.Nsteps + 1, 4), dtype=float)
         self.step_walltime = np.full((self.Nsteps,), np.nan, dtype=float)
         self.E_damp_acc = 0.0
@@ -362,6 +365,8 @@ class StructuralSolver:
             "rotation": self.zero_payload,
             "rotation_le": self.zero_payload,
             "rotation_te": self.zero_payload,
+            "surface_strain_percent": 100.0 * self.initial_surface_strain_rms,
+            "strain_increase_percentage_points": 0.0,
         }
         self.sock.sendall((json.dumps(init_msg) + "\n").encode())
         print("Initial zero geometry sent.")
@@ -404,7 +409,6 @@ class StructuralSolver:
         self._send_initial_geometry()
 
         for i_step in range(self.Nsteps):
-            step_start = perf_counter()
             solid_step_time = float("nan")
             print(f"Solid step {i_step + 1}/{self.Nsteps}: waiting for force...")
             line = self.sock_file.readline()
@@ -412,6 +416,7 @@ class StructuralSolver:
                 raise RuntimeError("Coupling server disconnected while sending force data")
 
             data = json.loads(line)
+            step_start = perf_counter()
             self.force_residuals[i_step] = optional_float(data, "force_residual")
             self.force_reference_norms[i_step] = optional_float(data, "force_reference_norm")
             self.force_relative_errors[i_step] = optional_float(data, "force_relative_error")
@@ -581,6 +586,11 @@ class StructuralSolver:
                     )
 
             self.model.update_fields()
+            surface_strain_rms = self.model.compute_surface_strain_rms()
+            self.surface_strain_percent[i_step] = 100.0 * surface_strain_rms
+            self.strain_increase_percentage_points[i_step] = 100.0 * (
+                surface_strain_rms - self.initial_surface_strain_rms
+            )
             t = self.time[i_step + 1]
             solid_io_start = perf_counter()
             self.xdmf_file.write(self.model.q, t)
@@ -693,6 +703,8 @@ class StructuralSolver:
                         "geometry_reference_norm": geometry_reference_norm,
                         "geometry_relative_error": geometry_relative_error,
                         "geometry_transfer_apply_time": geometry_transfer_apply_time,
+                        "surface_strain_percent": self.surface_strain_percent[i_step],
+                        "strain_increase_percentage_points": self.strain_increase_percentage_points[i_step],
                         "solid_solve_time": solid_solve_time,
                         "solid_io_time": solid_io_time,
                         "solid_step_time": solid_step_time,
@@ -700,6 +712,9 @@ class StructuralSolver:
                 )
                 self.sock.sendall((msg_geo + "\n").encode())
                 print(f"Solid step {i_step + 1}/{self.Nsteps}: geometry sent.")
+            else:
+                solid_step_time = perf_counter() - step_start
+                self.step_walltime[i_step] = solid_step_time
 
         self._finalize()
 
@@ -723,6 +738,7 @@ class StructuralSolver:
                 "fluid_force_round_trip_residual,fluid_force_round_trip_relative_error,"
                 "solid_displacement_round_trip_residual,solid_displacement_round_trip_relative_error,"
                 "geometry_residual,geometry_reference_norm,geometry_relative_error,geometry_transfer_apply_time,"
+                "surface_strain_percent,strain_increase_percentage_points,"
                 "solid_solve_time,solid_io_time,step_walltime\n"
             )
             for k_idx in range(self.Nsteps):
@@ -754,6 +770,8 @@ class StructuralSolver:
                     f"{self.geometry_reference_norms[k_idx]:.12e},"
                     f"{self.geometry_relative_errors[k_idx]:.12e},"
                     f"{self.geometry_transfer_apply_times[k_idx]:.12e},"
+                    f"{self.surface_strain_percent[k_idx]:.12e},"
+                    f"{self.strain_increase_percentage_points[k_idx]:.12e},"
                     f"{self.solid_solve_times[k_idx]:.12e},"
                     f"{self.solid_io_times[k_idx]:.12e},"
                     f"{self.step_walltime[k_idx]:.12e}\n"

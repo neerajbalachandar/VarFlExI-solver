@@ -343,6 +343,8 @@ class VarFlExICoupler:
                     "geometry_relative_error",
                     "geometry_transfer_residual",
                     "geometry_transfer_relative_error",
+                    "surface_strain_percent",
+                    "strain_increase_percentage_points",
                     "sample_fx",
                     "sample_fy",
                     "sample_fz",
@@ -352,6 +354,7 @@ class VarFlExICoupler:
                     "cd",
                     "solid_step_time",
                     "fluid_step_time",
+                    "fluid_solver_step_time",
                 ]
             )
 
@@ -373,6 +376,10 @@ class VarFlExICoupler:
                 ) = residual_metrics(geometry, self.state.prev_geometry, self.epsilon_reg)
                 self.state.prev_geometry = [row[:] for row in geometry]
                 solid_step_time = optional_float(geo_data, "solid_step_time")
+                surface_strain_percent = optional_float(geo_data, "surface_strain_percent")
+                strain_increase_percentage_points = optional_float(
+                    geo_data, "strain_increase_percentage_points"
+                )
 
                 if self.debug_io and geometry:
                     geom_mag = [(g[0] ** 2 + g[1] ** 2 + g[2] ** 2) ** 0.5 for g in geometry]
@@ -409,6 +416,7 @@ class VarFlExICoupler:
                 cl, cd = force_coefficients(relaxed_forces, q_inf, ref_area)
                 lift, drag = force_components(relaxed_forces)
                 fluid_step_time = optional_float(force_data, "fluid_step_time")
+                fluid_solver_step_time = optional_float(force_data, "fluid_solver_step_time")
                 force_data["lift"] = lift
                 force_data["drag"] = drag
                 force_data["cl"] = cl
@@ -521,6 +529,8 @@ class VarFlExICoupler:
                         "geometry_relative_error": geometry_relative_error,
                         "geometry_transfer_residual": geometry_transfer_residual,
                         "geometry_transfer_relative_error": geometry_transfer_relative_error,
+                        "surface_strain_percent": surface_strain_percent,
+                        "strain_increase_percentage_points": strain_increase_percentage_points,
                         "force_received": forces_received_raw,
                         "force_sent": relaxed_forces,
                         "lift": lift,
@@ -529,6 +539,7 @@ class VarFlExICoupler:
                         "cd": cd,
                         "solid_step_time": solid_step_time,
                         "fluid_step_time": fluid_step_time,
+                        "fluid_solver_step_time": fluid_solver_step_time,
                     },
                     history_fp,
                 )
@@ -565,6 +576,8 @@ class VarFlExICoupler:
                         f"{geometry_relative_error:.6e}",
                         f"{geometry_transfer_residual:.6e}" if geometry_transfer_residual == geometry_transfer_residual else "nan",
                         f"{geometry_transfer_relative_error:.6e}" if geometry_transfer_relative_error == geometry_transfer_relative_error else "nan",
+                        f"{surface_strain_percent:.6e}" if surface_strain_percent == surface_strain_percent else "nan",
+                        f"{strain_increase_percentage_points:.6e}" if strain_increase_percentage_points == strain_increase_percentage_points else "nan",
                         f"{float(sample[0]):.6e}",
                         f"{float(sample[1]):.6e}",
                         f"{float(sample[2]):.6e}",
@@ -574,6 +587,7 @@ class VarFlExICoupler:
                         f"{float(cd):.6e}" if cd == cd else "nan",
                         f"{solid_step_time:.6e}" if solid_step_time == solid_step_time else "nan",
                         f"{fluid_step_time:.6e}" if fluid_step_time == fluid_step_time else "nan",
+                        f"{fluid_solver_step_time:.6e}" if fluid_solver_step_time == fluid_solver_step_time else "nan",
                     ]
                 )
 

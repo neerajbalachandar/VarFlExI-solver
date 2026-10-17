@@ -2,6 +2,8 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     step_start_ns = time_ns()
     step_ref[] += 1
     step = step_ref[]
+    fluid_solver_step_time = previous_callback_end_ns[] == 0 ? NaN :
+        (step_start_ns - previous_callback_end_ns[]) / 1.0e9
 
     ensure_gamma!(wing, m_span)
     gamma_w = wing.sol["Gamma"]
@@ -96,6 +98,7 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     push!(cl_hist, cl)
     push!(cd_hist, cd)
     push!(fluid_step_time_hist, fluid_step_time)
+    push!(fluid_solver_step_time_hist, fluid_solver_step_time)
 
     println(
         force_trace_io,
@@ -116,6 +119,7 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
             "force_reference_norm" => force_ref_norm,
             "force_relative_error" => force_rel_error,
             "fluid_step_time" => fluid_step_time,
+            "fluid_solver_step_time" => isfinite(fluid_solver_step_time) ? fluid_solver_step_time : nothing,
         )),
     )
     flush(force_trace_io)
@@ -143,6 +147,7 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         "force_reference_norm" => force_ref_norm,
         "force_relative_error" => force_rel_error,
         "fluid_step_time" => fluid_step_time,
+        "fluid_solver_step_time" => isfinite(fluid_solver_step_time) ? fluid_solver_step_time : nothing,
     )) * "\n")
     flush(sock)
 
@@ -166,5 +171,6 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         push!(geom_rel_error_hist, geom_rel_error)
     end
 
+    previous_callback_end_ns[] = time_ns()
     return step >= nsteps
 end

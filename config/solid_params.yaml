@@ -2,7 +2,7 @@
 span: 0.96
 root_chord: 0.24
 tip_chord: 0.24
-thickness_ratio: 0.08
+thickness_ratio: 0.02
 leading_edge_sweep: 0.0
 
 nx: 30

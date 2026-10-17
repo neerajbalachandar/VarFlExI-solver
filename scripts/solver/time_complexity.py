@@ -42,7 +42,10 @@ THREAD_ENV_KEYS = [
     "JULIA_NUM_THREADS",
 ]
 COMPONENT_COLUMNS = {
-    "fluid": "fluid_step_time",
+    "fluid_core": "fluid_solver_step_time",
+    "fluid_callback": "fluid_step_time",
+}
+SOLID_COMPONENT_COLUMNS = {
     "solid": "solid_solve_time",
     "f_to_s": "force_transfer_apply_time",
     "s_to_f": "geometry_transfer_apply_time",
@@ -278,20 +281,53 @@ def problem_size(configs: dict[str, dict[str, Any]], rows: list[dict[str, str]])
 def aggregate_run(run_dir: Path, configs: dict[str, dict[str, Any]], warm: int, wall_s: float, peak: dict[str, Any],
                   sweep: str, parameter: str, value: Any, run_id: int, threads: int, cpu_list: str | None) -> dict[str, Any]:
     coupling_rows = read_csv(run_dir / "results" / "coupling" / "coupling_history.csv")
-    fluid_rows = read_csv(run_dir / "results" / "fluid" / "static_airfoil_spanwise_coupling_diagnostics.csv")
+    fluid_diag_path = run_dir / "results" / "fluid" / (
+        str(configs["fluid"].get("run_name", "")) + "_coupling_diagnostics.csv"
+    )
+    if not fluid_diag_path.exists():
+        candidates = sorted((run_dir / "results" / "fluid").glob("*_coupling_diagnostics.csv"))
+        fluid_diag_path = candidates[0] if candidates else fluid_diag_path
+    fluid_rows = read_csv(fluid_diag_path)
+    fluid_run_name = str(configs["fluid"].get("run_name", ""))
+    force_trace_path = run_dir / "results" / "fluid" / f"{fluid_run_name}_force_payload_history.jsonl"
+    if force_trace_path.exists():
+        with force_trace_path.open(encoding="utf-8") as trace:
+            for line in trace:
+                try:
+                    trace_row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if "particles" in trace_row:
+                    fluid_rows.append({"particles": str(trace_row["particles"])})
+    solid_output_dir = Path(str(configs["solid"].get("output_dir", "solid")))
+    if not solid_output_dir.is_absolute():
+        solid_output_dir = run_dir / "results" / solid_output_dir
+    solid_diag_path = solid_output_dir / str(
+        configs["solid"].get("diag_csv_filename", "solid_v18_diagnostics.csv")
+    )
+    solid_rows = read_csv(solid_diag_path)
     rows = coupling_rows
+    warm = min(max(int(warm), 0), max(len(rows) - 1, 0))
     bench_rows = [r for r in rows if int(float(r.get("step", 0))) > warm]
     n_bench = len(bench_rows)
     components = {name: sum_column(rows, col, warm) for name, col in COMPONENT_COLUMNS.items()}
+    components.update(
+        {name: sum_column(solid_rows, col, warm) for name, col in SOLID_COMPONENT_COLUMNS.items()}
+    )
     setup_crm = max((numeric(r.get("crm_setup_time"), 0.0) for r in rows), default=0.0)
     setup_rbf = max((numeric(r.get("rbf_setup_time"), 0.0) for r in rows), default=0.0)
     setup_geom = max((numeric(r.get("geometry_rbf_setup_time"), 0.0) for r in rows), default=0.0)
-    t_benchmark = components["fluid"] + sum_column(rows, "solid_step_time", warm)
+    solid_wall_time = sum_column(solid_rows, "step_walltime", warm)
+    t_benchmark = components["fluid_core"] + components["fluid_callback"] + solid_wall_time
     transfer = components["f_to_s"] + components["s_to_f"]
-    known = components["fluid"] + components["solid"] + transfer + components["io"]
+    known = (
+        components["fluid_core"]
+        + components["fluid_callback"]
+        + components["solid"]
+        + transfer
+        + components["io"]
+    )
     coupling_other = max(t_benchmark - known, 0.0)
-    components["transfer"] = transfer
-    components["coupling"] = coupling_other
     components["other"] = coupling_other
     size = problem_size(configs, fluid_rows)
     out = {
@@ -350,7 +386,16 @@ def write_aggregate(raw_rows: list[dict[str, Any]], path: Path) -> None:
     groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for row in raw_rows:
         groups.setdefault((row["sweep"], row["parameter"], str(row["parameter_value"])), []).append(row)
-    metric_cols = [c for c in raw_rows[0] if c.startswith("t_") or c.startswith("mean_") or c.startswith("setup_") or c.startswith("m_peak") or c.startswith("frac_")]
+    metric_cols = [
+        c
+        for c in raw_rows[0]
+        if c.startswith("t_")
+        or c.startswith("mean_")
+        or c.startswith("setup_")
+        or c.startswith("m_peak")
+        or c.startswith("frac_")
+        or c == "wall_total_s"
+    ]
     fieldnames = ["sweep", "parameter", "parameter_value", "n_runs", "run_dirs"]
     for col in metric_cols:
         fieldnames.extend([f"{col}_mean", f"{col}_variance", f"{col}_std"])
@@ -375,7 +420,7 @@ def main() -> None:
     parser.add_argument("--spatial-values", default="20,40,80")
     parser.add_argument("--pperstep-values", default="1,2,4")
     parser.add_argument("--n-runs", type=int, default=3)
-    parser.add_argument("--n-warm", type=int, default=60)
+    parser.add_argument("--n-warm", type=int, default=10)
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--cpu-list", default=None)
     parser.add_argument("--sample-interval", type=float, default=0.25)
@@ -437,6 +482,15 @@ def main() -> None:
                     w.writeheader(); w.writerows(raw_rows)
                 write_aggregate(raw_rows, agg_csv)
                 print(f"[time_complexity] completed {case.name} run {run_id}")
+                split_names = ["fluid_core", "fluid_callback", "solid", "f_to_s", "s_to_f", "io", "other"]
+                split_text = ", ".join(
+                    f"{name}={row.get(f't_{name}_s', math.nan):.3f}s" for name in split_names
+                )
+                print(
+                    f"[time_complexity] post-warm-up component totals "
+                    f"({row['n_benchmark_steps']} steps): {split_text}; "
+                    f"total={row['t_benchmark_s']:.3f}s"
+                )
     finally:
         restore_configs(snapshot)
 

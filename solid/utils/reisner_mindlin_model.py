@@ -128,18 +128,14 @@ class ReissnerMindlinModel:
         """
         grad_u = grad(u_mem)
         grad_w = grad(w)
-        eps = self.membrane_strain(u_mem) + 0.5 * outer(grad_w, grad_w)
-        if self.include_quadratic_inplane_strain:
-            eps += 0.5 * dot(grad_u.T, grad_u)
-        return eps
+        return self.membrane_strain(u_mem) + 0.5 * outer(grad_w, grad_w)
 
-    def nonlinear_membrane_variation(self, u_mem, w, delta_u, delta_w):
-        """Consistent first variation of the nonlinear membrane strain.
+    def nonlinear_membrane_variation(self, w, delta_w, delta_u):
+        """Consistent virtual von Karman membrane strain.
 
-        State-dependent terms contain the current displacement fields, not
-        only test functions.  For the Green--Lagrange contribution,
-        d[1/2 grad(u).T*grad(u)] =
-        sym(grad(u).T*grad(delta_u)).
+        The transverse part contains the current ``w`` and virtual ``delta_w``;
+        evaluating ``nonlinear_membrane_strain(delta_u, delta_w)`` here would
+        be mathematically incorrect.
         """
         eps_virtual = self.membrane_strain(delta_u) + sym(
             outer(grad(w), grad(delta_w))
