@@ -26,8 +26,11 @@ eta_m: 1.2
 eta_k: 5.0e-5
 kappa_shear: 0.833
 
-# von Karman membrane kinematics.  Set false to retain the linear baseline.
+# Green--Lagrange mid-surface membrane kinematics.  Set
+# geometric_nonlinearity false for the linear baseline; set
+# include_quadratic_inplane_strain false for the preceding von Karman model.
 geometric_nonlinearity: true
+include_quadratic_inplane_strain: true
 
 alpha_m: 0.1
 alpha_f: 0.2

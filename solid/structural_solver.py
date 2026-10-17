@@ -170,6 +170,9 @@ class StructuralSolver:
             geometric_nonlinearity=cfg_get(
                 self.solid_config, "geometric_nonlinearity", default=True
             ),
+            include_quadratic_inplane_strain=cfg_get(
+                self.solid_config, "include_quadratic_inplane_strain", default=True
+            ),
         )
         self.model.build_residual_forms()
 
