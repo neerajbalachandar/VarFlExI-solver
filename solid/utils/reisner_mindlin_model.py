@@ -327,6 +327,27 @@ class ReissnerMindlinModel:
             * dx
         )
 
+    def compute_surface_strain_rms(self):
+        """Area RMS of the top/bottom plate-surface strain tensors."""
+        u_mem, w, theta = split(self.q_old)
+        eps_mem = (
+            self.nonlinear_membrane_strain(u_mem, w)
+            if self.geometric_nonlinearity
+            else self.membrane_strain(u_mem)
+        )
+        eps_bend = 0.5 * self.h * self.curvature(theta)
+        eps_top = eps_mem + eps_bend
+        eps_bottom = eps_mem - eps_bend
+        measure = dx(domain=self.domain.mesh)
+        area = assemble(Constant(1.0) * measure)
+        if area <= 0.0:
+            raise RuntimeError("Cannot compute surface strain on a zero-area mesh")
+        mean_square = (
+            assemble(inner(eps_top, eps_top) * measure)
+            + assemble(inner(eps_bottom, eps_bottom) * measure)
+        ) / (2.0 * area)
+        return float(np.sqrt(max(mean_square, 0.0)))
+
     def compute_kinetic_energy(self):
         return 0.5 * assemble(self.mass_form(self.v_old, self.v_old))
 

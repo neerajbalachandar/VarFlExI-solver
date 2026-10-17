@@ -2,7 +2,9 @@
 span: 0.96
 root_chord: 0.24
 tip_chord: 0.24
-thickness_ratio: 0.02
+# A 4%-chord plate keeps the configured 3 GPa material visibly flexible
+# under freestream loading without the extreme compliance of the 2% baseline.
+thickness_ratio: 0.04
 leading_edge_sweep: 0.0
 
 nx: 30

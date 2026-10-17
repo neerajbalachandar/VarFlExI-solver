@@ -45,7 +45,21 @@ span_sampling_mode = coupling_cfg.span_sampling
 solid_ny_for_sampling = coupling_cfg.solid_ny
 custom_span_stride = coupling_cfg.custom_stride
 
-Vinf(X, t) = magVinf * [cosd(AOA), 0.0, sind(AOA)]
+length(solver_cfg.freestream_gradient) == 9 || error("freestream_gradient must have 9 row-major values")
+length(solver_cfg.freestream_oscillation) == 3 || error("freestream_oscillation must have 3 components")
+length(solver_cfg.freestream_reference) == 3 || error("freestream_reference must have 3 components")
+freestream_base = magVinf * [cosd(AOA), 0.0, sind(AOA)]
+freestream_gradient = permutedims(reshape(solver_cfg.freestream_gradient, 3, 3))
+freestream_amplitude = solver_cfg.freestream_oscillation
+freestream_reference = solver_cfg.freestream_reference
+freestream_frequency = solver_cfg.freestream_frequency
+freestream_phase = solver_cfg.freestream_phase
+Vinf(X, t) = freestream_base + freestream_gradient * (X .- freestream_reference) +
+             freestream_amplitude .* sin(2pi * freestream_frequency * t + freestream_phase)
+
+if any(x -> !iszero(x), freestream_gradient)
+    @warn "Spatial freestream gradient is active for VLM force evaluation; this FLOWVPM version advects wake particles using Uinf(t) sampled at a reference point, so wake convection does not resolve spatial gradients."
+end
 
 if solver_cfg.regularize_vlm
     vlm.VLMSolver._regularize(true)
@@ -53,7 +67,9 @@ end
 
 println(
     "Fluid config: AoA=$(AOA) deg, U=$(magVinf) m/s, rho=$(rho), nu=$(nu), span=$(span), " *
-    "n_span=$(n_span), nsteps=$(nsteps), dt=$(dt), p_per_step=$(p_per_step)"
+    "n_span=$(n_span), nsteps=$(nsteps), dt=$(dt), p_per_step=$(p_per_step), " *
+    "polar=$(isempty(solver_cfg.section_polar) ? \"disabled\" : solver_cfg.section_polar), " *
+    "shed_boundarylayer=$(solver_cfg.shed_boundarylayer)"
 )
 
 wing = make_cantilever_template(
@@ -61,8 +77,18 @@ wing = make_cantilever_template(
 )
 wing_ref = deepcopy(wing)
 
+polar_path = isempty(solver_cfg.section_polar_path) ? nothing : solver_cfg.section_polar_path
+parasitic_args = polar_path === nothing ? () : (read_path=polar_path,)
+aerodynamic_force_calculator = uns.generate_calc_aerodynamicforce(
+    add_parasiticdrag=!isempty(solver_cfg.section_polar),
+    airfoilpolar=solver_cfg.section_polar,
+    parasiticdrag_args=parasitic_args,
+)
+
 system = vlm.WingSystem()
 vlm.addwing(system, "Wing", wing)
+ensure_gamma!(system, vlm.get_m(system))
+previous_force_system = Ref(deepcopy(system))
 vehicle = uns.VLMVehicle(system; vlm_system=system, wake_system=system)
 
 Vvehicle(t) = zeros(3)
@@ -207,7 +233,7 @@ drag_hist = Float64[]
 cl_hist = Float64[]
 cd_hist = Float64[]
 fluid_step_time_hist = Float64[]
-fluid_solver_step_time_hist = Float64[]
+fluid_interstep_time_hist = Float64[]
 previous_callback_end_ns = Ref{UInt64}(0)
 force_trace_path = joinpath(save_path, run_name * "_force_payload_history.jsonl")
 force_trace_io = open(force_trace_path, "w")
@@ -233,5 +259,4 @@ end
 apply_from_message!(msg0; first_step=true, step=0)
 
 step_ref = Ref(0)
-use_ftot_force = Ref(solver_cfg.use_ftot_force)
 runtime_pipeline = uns.concatenate(wake_treatment, coupling_runtime_function)

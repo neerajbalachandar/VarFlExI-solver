@@ -11,6 +11,9 @@ uns.run_simulation(simulation, nsteps;
     vpm_viscous = vpm_viscous,
     shed_starting=shed_starting,
     shed_unsteady=use_unsteady_shedding,
+    shed_boundarylayer=solver_cfg.shed_boundarylayer,
+    boundarylayer_prescribedCd=solver_cfg.boundarylayer_prescribed_cd,
+    boundarylayer_d=solver_cfg.boundarylayer_dipole_width,
     unsteady_shedcrit=unsteady_shedcrit,
     omit_shedding=omit_shedding_rows,
     wake_coupled=wake_coupled,
@@ -29,7 +32,7 @@ open(diag_path, "w") do io
         io,
         "step,time,force_residual,force_reference_norm,force_relative_error," *
         "geometry_residual,geometry_reference_norm,geometry_relative_error," *
-        "lift,drag,cl,cd,fluid_step_time,fluid_solver_step_time"
+        "lift,drag,cl,cd,fluid_step_time,fluid_interstep_time"
     )
     n = length(step_hist)
     for k in 1:n
@@ -44,9 +47,9 @@ open(diag_path, "w") do io
         cl = k <= length(cl_hist) ? cl_hist[k] : NaN
         cd = k <= length(cd_hist) ? cd_hist[k] : NaN
         step_time = k <= length(fluid_step_time_hist) ? fluid_step_time_hist[k] : NaN
-        solver_step_time = k <= length(fluid_solver_step_time_hist) ? fluid_solver_step_time_hist[k] : NaN
+        interstep_time = k <= length(fluid_interstep_time_hist) ? fluid_interstep_time_hist[k] : NaN
         time_value = step_hist[k] * dt
-        println(io, "$(step_hist[k]),$(time_value),$(fres),$(fref),$(frel),$(gres),$(gref),$(grel),$(lift),$(drag),$(cl),$(cd),$(step_time),$(solver_step_time)")
+        println(io, "$(step_hist[k]),$(time_value),$(fres),$(fref),$(frel),$(gres),$(gref),$(grel),$(lift),$(drag),$(cl),$(cd),$(step_time),$(interstep_time)")
     end
 end
 

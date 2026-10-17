@@ -1,12 +1,29 @@
 
 run_name: rect_linear_regime
-particles_per_step: 2
+particles_per_step: 4
 save_every: 2
 
 aoa_deg: 3.0
 vinf: 15.0
 rho: 1.225
 nu: 1.5e-05
+
+# V(x,t) = V0 + G*(x-x_ref) + A*sin(2*pi*f*t + phase).
+# G is row-major (3x3); zero values retain uniform freestream.
+freestream_gradient: [0, 0, 0, 0, 0, 0, 0, 0, 0]
+freestream_oscillation: [0, 0, 0]
+freestream_frequency_hz: 0.0
+freestream_phase_deg: 0.0
+freestream_reference: [0, 0, 0]
+
+# Empty polar disables parasitic drag; provide a validated sectional polar to enable it.
+section_polar: ""
+section_polar_path: ""
+
+# FLOWUnsteady's boundary-layer wake shedding is experimental and distinct from polar drag.
+shed_boundarylayer: false
+boundarylayer_prescribed_cd: 0.1
+boundarylayer_dipole_width: 0.0
 
 twist_root: 0.0
 twist_tip: 0.0
@@ -64,5 +81,4 @@ save_force_history: true
 save_diagnostics: true
 save_horseshoes: true
 regularize_vlm: true
-use_ftot_force: true
 nsteps_save: 2

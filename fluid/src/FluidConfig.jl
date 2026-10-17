@@ -125,12 +125,24 @@ function load_configs(fluid_path::AbstractString, solid_path::AbstractString, co
         as_int(fluid, "nsteps_save", as_int(fluid, "save_every", 1)),
         as_bool(fluid, "save_horseshoes", true),
         as_bool(fluid, "save_geometry_csv", true),
-        as_bool(fluid, "use_ftot_force", true),
         lowercase(get(ENV, "COUPLING_DEBUG_IO", "0")) ∉ ("0", "false", "no"),
         as_bool(fluid, "regularize_vlm", true),
         as_int(fluid, "max_particles", 400000),
         as_float(fluid, "max_particles_safety_factor", 3.0),
+        as_string(fluid, "section_polar", ""),
+        as_string(fluid, "section_polar_path", ""),
+        Float64.(get(fluid, "freestream_gradient", zeros(9))),
+        Float64.(get(fluid, "freestream_oscillation", zeros(3))),
+        as_float(fluid, "freestream_frequency_hz", 0.0),
+        deg2rad(as_float(fluid, "freestream_phase_deg", 0.0)),
+        Float64.(get(fluid, "freestream_reference", zeros(3))),
+        as_bool(fluid, "shed_boundarylayer", false),
+        as_float(fluid, "boundarylayer_prescribed_cd", 0.1),
+        as_float(fluid, "boundarylayer_dipole_width", 0.0),
     )
+
+    solver_cfg.shed_boundarylayer && solver_cfg.boundarylayer_dipole_width <= 0.0 &&
+        error("shed_boundarylayer requires boundarylayer_dipole_width > 0")
 
     wake_cfg = WakeConfig(
         as_int(fluid, "remove_every", 100),

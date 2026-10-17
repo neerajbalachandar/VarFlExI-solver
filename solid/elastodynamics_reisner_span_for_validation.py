@@ -300,6 +300,23 @@ def curvature(theta):
     return sym(grad(theta))
 
 
+def surface_strain_rms(q_fun):
+    u_mem, _w, theta = split(q_fun)
+    eps_mem = membrane_strain(u_mem)
+    eps_bend = 0.5 * h * curvature(theta)
+    eps_top = eps_mem + eps_bend
+    eps_bottom = eps_mem - eps_bend
+    measure = dx(domain=mesh)
+    area = assemble(Constant(1.0) * measure)
+    if area <= 0.0:
+        raise RuntimeError("Cannot compute surface strain on a zero-area mesh")
+    mean_square = (
+        assemble(inner(eps_top, eps_top) * measure)
+        + assemble(inner(eps_bottom, eps_bottom) * measure)
+    ) / (2.0 * area)
+    return float(np.sqrt(max(mean_square, 0.0)))
+
+
 def shear_strain(theta, w):
     """Transverse shear strain: gamma = grad(w) - theta"""
     return grad(w) - theta
@@ -963,6 +980,8 @@ diag_writer.writerow([
     # Forces
     # -----------------------------
     "ForceNorm",
+    "SurfaceStrainPercent",
+    "StrainIncreasePercentagePoints",
 
     # -----------------------------
     # CPU
@@ -972,6 +991,7 @@ diag_writer.writerow([
 
 diag_fp.flush()
 os.fsync(diag_fp.fileno())
+initial_surface_strain_rms = surface_strain_rms(q_old)
 
 
 xdmf_path = os.path.join(out_dir, "elastodynamics-results.xdmf")
@@ -1378,6 +1398,7 @@ for i_step in range(Nsteps):
             )
 
     update_fields(q, q_old, v_old, a_old)
+    surface_strain_rms_current = surface_strain_rms(q_old)
     if ((i_step+1)%restart_interval)==0:
 
         save_restart(
@@ -1548,6 +1569,9 @@ for i_step in range(Nsteps):
 
         force_norm[i_step+1],
 
+        100.0 * surface_strain_rms_current,
+        100.0 * (surface_strain_rms_current - initial_surface_strain_rms),
+
         simulation_walltime
 
     ])
@@ -1627,6 +1651,10 @@ for i_step in range(Nsteps):
                 "geometry": u_cp_arr.tolist(),
                 "geometry_le": u_le_arr.tolist(),
                 "geometry_te": u_te_arr.tolist(),
+                "surface_strain_percent": 100.0 * surface_strain_rms_current,
+                "strain_increase_percentage_points": 100.0 * (
+                    surface_strain_rms_current - initial_surface_strain_rms
+                ),
                 "rotation": zero_rot.tolist(),
                 "rotation_le": zero_rot.tolist(),
                 "rotation_te": zero_rot.tolist(),

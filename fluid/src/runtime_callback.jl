@@ -2,7 +2,7 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     step_start_ns = time_ns()
     step_ref[] += 1
     step = step_ref[]
-    fluid_solver_step_time = previous_callback_end_ns[] == 0 ? NaN :
+    fluid_interstep_time = previous_callback_end_ns[] == 0 ? NaN :
         (step_start_ns - previous_callback_end_ns[]) / 1.0e9
 
     ensure_gamma!(wing, m_span)
@@ -23,19 +23,23 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         for i in 1:m_span
     ]
 
-    frow = nothing
-    if use_ftot_force[]
-        try
-            # FLOWVLM force postprocessing can fail for some wing layouts/types.
-            # When it does, keep the coupling stable by permanently falling back
-            # to Gamma-based force (KJ) rather than warning every step.
-            vlm.calculate_field(wing, "Ftot"; rhoinf=rho, t=T)
-            haskey(wing.sol, "Ftot") && (frow = wing.sol["Ftot"])
-        catch err
-            use_ftot_force[] = false
-            @warn "Disabling Ftot-based force extraction; falling back to Gamma-based force. Root cause: $(sprint(showerror, err))"
-        end
+    ensure_gamma!(system, m_span)
+    ensure_gamma!(previous_force_system[], m_span)
+    populate_vpm_force_velocity_fields!(system, PFIELD, DT, T)
+    frow = aerodynamic_force_calculator(
+        system, previous_force_system[], PFIELD, Vinf, DT, rho; t=T
+    )
+    # FLOWUnsteady computes dGamma/dt using the previous wing, but its stock
+    # force builder stores Funs-vector separately and leaves it out of Ftot.
+    if haskey(system.sol, "Funs-vector")
+        f_unsteady = system.sol["Funs-vector"]
+        length(f_unsteady) == length(frow) || error("FLOWUnsteady Funs-vector size mismatch")
+        frow = [frow[i] + f_unsteady[i] for i in eachindex(frow)]
     end
+    # Retain this time level before the next received geometry is applied;
+    # FLOWUnsteady uses it for both dGamma/dt and its discrete surface velocity.
+    previous_force_system[] = deepcopy(system)
+    previous_force_system[].sol["Gamma"] = copy(system.sol["Gamma"])
 
     for i in 1:m_span
         γ = gamma_w[i]
@@ -43,21 +47,15 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         gamma_w[i] = γ
 
         fx_raw, fy_raw, fz_raw = 0.0, 0.0, 0.0
-        if frow != nothing && i <= length(frow)
+        if i <= length(frow)
             fi = frow[i]
             if length(fi) == 3 && all(isfinite, fi)
                 fx_raw, fy_raw, fz_raw = Float64(fi[1]), Float64(fi[2]), Float64(fi[3])
             else
-                Vloc = fallback_relative_velocity(wing, i, T)
-                lvec = [wing._xn[i + 1] - wing._xn[i], wing._yn[i + 1] - wing._yn[i], wing._zn[i + 1] - wing._zn[i]]
-                Fkj = rho * γ * cross(Vloc, lvec)
-                fx_raw, fy_raw, fz_raw = Fkj[1], Fkj[2], Fkj[3]
+                error("Non-finite FLOWUnsteady force at span element $i")
             end
         else
-            Vloc = fallback_relative_velocity(wing, i, T)
-            lvec = [wing._xn[i + 1] - wing._xn[i], wing._yn[i + 1] - wing._yn[i], wing._zn[i + 1] - wing._zn[i]]
-            Fkj = rho * γ * cross(Vloc, lvec)
-            fx_raw, fy_raw, fz_raw = Fkj[1], Fkj[2], Fkj[3]
+            error("FLOWUnsteady force count mismatch: received $(length(frow)), expected $m_span")
         end
 
         fx = force_relax * fx_raw + (1 - force_relax) * forces_prev[i, 1]
@@ -88,7 +86,9 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     lift = sum(force_mat[:, 3])
     drag = -sum(force_mat[:, 1])
     ref_area = max(span * root_chord, 1.0e-16)
-    q_inf = 0.5 * rho * magVinf^2
+    q_inf = 0.5 * rho * sum(
+        sum(abs2, Vinf([wing._xm[i], wing._ym[i], wing._zm[i]], T)) for i in 1:m_span
+    ) / m_span
     denom = max(q_inf * ref_area, 1.0e-16)
     cl = lift / denom
     cd = drag / denom
@@ -98,7 +98,7 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     push!(cl_hist, cl)
     push!(cd_hist, cd)
     push!(fluid_step_time_hist, fluid_step_time)
-    push!(fluid_solver_step_time_hist, fluid_solver_step_time)
+    push!(fluid_interstep_time_hist, fluid_interstep_time)
 
     println(
         force_trace_io,
@@ -119,7 +119,7 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
             "force_reference_norm" => force_ref_norm,
             "force_relative_error" => force_rel_error,
             "fluid_step_time" => fluid_step_time,
-            "fluid_solver_step_time" => isfinite(fluid_solver_step_time) ? fluid_solver_step_time : nothing,
+            "fluid_interstep_time" => isfinite(fluid_interstep_time) ? fluid_interstep_time : nothing,
         )),
     )
     flush(force_trace_io)
@@ -147,7 +147,7 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         "force_reference_norm" => force_ref_norm,
         "force_relative_error" => force_rel_error,
         "fluid_step_time" => fluid_step_time,
-        "fluid_solver_step_time" => isfinite(fluid_solver_step_time) ? fluid_solver_step_time : nothing,
+        "fluid_interstep_time" => isfinite(fluid_interstep_time) ? fluid_interstep_time : nothing,
     )) * "\n")
     flush(sock)
 

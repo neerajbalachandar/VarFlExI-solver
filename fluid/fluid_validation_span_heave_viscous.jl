@@ -7,6 +7,8 @@ import FLOWVPM as vpm
 using Dates
 using Statistics
 
+include(joinpath(@__DIR__, "src", "force_utils.jl"))
+
 function wing_maneuver(;
     disp_plot=true,
     vehicle_velocity::Real=0.30,
@@ -168,6 +170,12 @@ shed_starting = true
 use_unsteady_shedding = true
 unsteady_shedcrit = 0.0
 vlm_rlx = 0.35
+shed_boundarylayer = lowercase(get(ENV, "FLUID_SHED_BOUNDARYLAYER", "false")) in ("1", "true", "yes")
+boundarylayer_prescribed_cd = parse(Float64, get(ENV, "FLUID_BOUNDARYLAYER_CD", "0.1"))
+boundarylayer_dipole_width = parse(Float64, get(ENV, "FLUID_BOUNDARYLAYER_D", "0.0"))
+if shed_boundarylayer && boundarylayer_dipole_width <= 0
+    error("FLUID_SHED_BOUNDARYLAYER requires FLUID_BOUNDARYLAYER_D > 0")
+end
 
 # Make a balance for this
 
@@ -229,7 +237,21 @@ function assert_eta_close(name::String, a::Vector{Float64}, b::Vector{Float64}; 
     )
 end
 
-Vinf(X, t) = magVinf * [cosd(AOA), 0.0, sind(AOA)]
+freestream_gradient_values = parse.(Float64, split(get(ENV, "FLUID_VINF_GRADIENT", "0,0,0,0,0,0,0,0,0"), ","))
+freestream_oscillation = parse.(Float64, split(get(ENV, "FLUID_VINF_OSCILLATION", "0,0,0"), ","))
+length(freestream_gradient_values) == 9 || error("FLUID_VINF_GRADIENT must contain 9 comma-separated values")
+length(freestream_oscillation) == 3 || error("FLUID_VINF_OSCILLATION must contain 3 comma-separated values")
+freestream_gradient = permutedims(reshape(freestream_gradient_values, 3, 3))
+freestream_reference = parse.(Float64, split(get(ENV, "FLUID_VINF_REFERENCE", "0,0,0"), ","))
+length(freestream_reference) == 3 || error("FLUID_VINF_REFERENCE must contain 3 comma-separated values")
+freestream_frequency = parse(Float64, get(ENV, "FLUID_VINF_FREQUENCY_HZ", "0"))
+freestream_phase = deg2rad(parse(Float64, get(ENV, "FLUID_VINF_PHASE_DEG", "0")))
+freestream_base = magVinf * [cosd(AOA), 0.0, sind(AOA)]
+Vinf(X, t) = freestream_base + freestream_gradient * (X .- freestream_reference) +
+             freestream_oscillation .* sin(2pi * freestream_frequency * t + freestream_phase)
+if any(x -> !iszero(x), freestream_gradient)
+    @warn "Spatial freestream gradient is active at aerodynamic points, but FLOWVPM wake advection samples Uinf at one reference point and cannot resolve spatial gradients."
+end
 
 println(
     "Fluid v9 config: AoA=$(AOA) deg, U=$(magVinf) m/s, rho=$(rho), nu=$(nu), span=$(span), " *
@@ -255,9 +277,19 @@ wing = make_cantilever_template(
     span, root_chord, tip_chord, leading_edge_sweep, 0.0, twist_root, twist_tip, n_span
 )
 wing_ref = deepcopy(wing)
+section_polar = strip(get(ENV, "FLUID_SECTION_POLAR", ""))
+section_polar_path = strip(get(ENV, "FLUID_SECTION_POLAR_PATH", ""))
+parasitic_args = isempty(section_polar_path) ? () : (read_path=section_polar_path,)
+aerodynamic_force_calculator = uns.generate_calc_aerodynamicforce(
+    add_parasiticdrag=!isempty(section_polar),
+    airfoilpolar=section_polar,
+    parasiticdrag_args=parasitic_args,
+)
 
 system = vlm.WingSystem()
 vlm.addwing(system, "Wing", wing)
+ensure_gamma!(system, vlm.get_m(system))
+previous_force_system = Ref(deepcopy(system))
 vehicle = uns.VLMVehicle(system; vlm_system=system, wake_system=system)
 
 # Vvehicle(t) = zeros(3)
@@ -324,6 +356,7 @@ vpm_viscous = vpm.CoreSpreading(nu, sigma_vpm_overwrite, 1.0)
 
 println(
     "Shedding config v9: spanwise-only wing, n_span=$(n_span), " *
+    "shed_boundarylayer=$(shed_boundarylayer), " *
     "omit_shedding rows=$(length(omit_shedding_rows)), wake_sphere_factor=$(wake_sphere_factor), " *
     "wake_remove_every=$(wake_remove_every), " *
     "wake_strength_factors=($(wake_strength_min_factor),$(wake_strength_max_factor)), " *
@@ -753,7 +786,6 @@ end
 apply_from_message!(msg0; first_step=true, step=0)
 
 step_ref = Ref(0)
-use_ftot_force = Ref(true)
 
 function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
 
@@ -773,19 +805,20 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     force_out = Vector{Vector{Float64}}(undef, m_span)
     prev_snapshot = copy(forces_prev)
 
-    frow = nothing
-    if use_ftot_force[]
-        try
-            # FLOWVLM force postprocessing can fail for some wing layouts/types.
-            # When it does, keep the coupling stable by permanently falling back
-            # to Gamma-based force (KJ) rather than warning every step.
-            vlm.calculate_field(wing, "Ftot"; rhoinf=rho, t=T)
-            haskey(wing.sol, "Ftot") && (frow = wing.sol["Ftot"])
-        catch err
-            use_ftot_force[] = false
-            @warn "Disabling Ftot-based force extraction; falling back to Gamma-based force. Root cause: $(sprint(showerror, err))"
-        end
+    ensure_gamma!(system, m_span)
+    ensure_gamma!(previous_force_system[], m_span)
+    populate_vpm_force_velocity_fields!(system, PFIELD, DT, T)
+    frow = aerodynamic_force_calculator(
+        system, previous_force_system[], PFIELD, Vinf, DT, rho; t=T
+    )
+    if haskey(system.sol, "Funs-vector")
+        f_unsteady = system.sol["Funs-vector"]
+        length(f_unsteady) == length(frow) || error("FLOWUnsteady Funs-vector size mismatch")
+        frow = [frow[i] + f_unsteady[i] for i in eachindex(frow)]
     end
+    # Snapshot before the next structural geometry update for dGamma/dt and Vkin.
+    previous_force_system[] = deepcopy(system)
+    previous_force_system[].sol["Gamma"] = copy(system.sol["Gamma"])
 
     for i in 1:m_span
         γ = gamma_w[i]
@@ -793,21 +826,15 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         gamma_w[i] = γ
 
         fx_raw, fy_raw, fz_raw = 0.0, 0.0, 0.0
-        if frow != nothing && i <= length(frow)
+        if i <= length(frow)
             fi = frow[i]
             if length(fi) == 3 && all(isfinite, fi)
                 fx_raw, fy_raw, fz_raw = Float64(fi[1]), Float64(fi[2]), Float64(fi[3])
             else
-                Vloc = fallback_relative_velocity(wing, i, T)
-                lvec = [wing._xn[i + 1] - wing._xn[i], wing._yn[i + 1] - wing._yn[i], wing._zn[i + 1] - wing._zn[i]]
-                Fkj = rho * γ * cross(Vloc, lvec)
-                fx_raw, fy_raw, fz_raw = Fkj[1], Fkj[2], Fkj[3]
+                error("Non-finite FLOWUnsteady force at span element $i")
             end
         else
-            Vloc = fallback_relative_velocity(wing, i, T)
-            lvec = [wing._xn[i + 1] - wing._xn[i], wing._yn[i + 1] - wing._yn[i], wing._zn[i + 1] - wing._zn[i]]
-            Fkj = rho * γ * cross(Vloc, lvec)
-            fx_raw, fy_raw, fz_raw = Fkj[1], Fkj[2], Fkj[3]
+            error("FLOWUnsteady force count mismatch: received $(length(frow)), expected $m_span")
         end
 
         fx = force_relax * fx_raw + (1 - force_relax) * forces_prev[i, 1]
@@ -828,7 +855,10 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
 
         Sref = span * root_chord
 
-        Ct = total_thrust / (0.5 * rho * magVinf^2 * Sref)
+        q_ref = 0.5 * rho * sum(
+            sum(abs2, Vinf([wing._xm[j], wing._ym[j], wing._zm[j]], T)) for j in 1:m_span
+        ) / m_span
+        Ct = total_thrust / max(q_ref * Sref, 1.0e-16)
 
         push!(thrust_history, total_thrust)
         push!(Ct_history, Ct)
@@ -947,6 +977,9 @@ uns.run_simulation(simulation, nsteps;
     vpm_viscous = vpm_viscous, # New VPM Viscous scheme
     shed_starting=shed_starting,
     shed_unsteady=use_unsteady_shedding,
+    shed_boundarylayer=shed_boundarylayer,
+    boundarylayer_prescribedCd=boundarylayer_prescribed_cd,
+    boundarylayer_d=boundarylayer_dipole_width,
     unsteady_shedcrit=unsteady_shedcrit,
     omit_shedding=omit_shedding_rows,
     wake_coupled=true,

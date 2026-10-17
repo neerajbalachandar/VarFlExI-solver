@@ -83,7 +83,11 @@ os.makedirs(results_dir, exist_ok=True)
 log_csv = os.path.join(results_dir, "coupling_history.csv")
 log_fp = open(log_csv, "w", newline="")
 writer = csv.writer(log_fp)
-writer.writerow(["step", "n_forces", "force_relax_used", "force_residual", "sample_fx", "sample_fy", "sample_fz"])
+writer.writerow([
+    "step", "n_forces", "force_relax_used", "force_residual",
+    "sample_fx", "sample_fy", "sample_fz",
+    "surface_strain_percent", "strain_increase_percentage_points",
+])
 forces_jsonl = os.path.join(results_dir, "forces_sent_received_history.jsonl")
 forces_fp = open(forces_jsonl, "w")
 
@@ -106,6 +110,9 @@ for step in range(1, NSTEPS + 1):
     print("Geometry received.")
     geometry = geo_data.get("geometry", [])
 
+    if not isinstance(geometry, list) or len(geometry) == 0:
+        raise RuntimeError(f"Solid sent invalid geometry payload at step {step}")
+
     sample_geom = geometry[0]
 
     print(
@@ -123,10 +130,6 @@ for step in range(1, NSTEPS + 1):
         f"Geometry max={max(geom_mag):.6e}, "
         f"mean={sum(geom_mag)/len(geom_mag):.6e}"
     )
-
-    if not isinstance(geometry, list) or len(geometry) == 0:
-        raise RuntimeError(f"Solid sent invalid geometry payload at step {step}")
-    
 
     n_span = int(geo_data.get("n_span", 0)) if "n_span" in geo_data else 0
     n_chord = int(geo_data.get("n_chord", 0)) if "n_chord" in geo_data else 0
@@ -281,6 +284,8 @@ for step in range(1, NSTEPS + 1):
             "force_residual": force_residual,
             "force_received": forces_received_raw,
             "force_sent": forces_sent,
+            "surface_strain_percent": geo_data.get("surface_strain_percent"),
+            "strain_increase_percentage_points": geo_data.get("strain_increase_percentage_points"),
         },
         forces_fp,
     )
@@ -294,6 +299,8 @@ for step in range(1, NSTEPS + 1):
         f"{float(forces[0][0]):.6e}",
         f"{float(forces[0][1]):.6e}",
         f"{float(forces[0][2]):.6e}",
+        f"{float(geo_data.get('surface_strain_percent', float('nan'))):.6e}",
+        f"{float(geo_data.get('strain_increase_percentage_points', float('nan'))):.6e}",
     ])
 
     # 4. Send forces to solid

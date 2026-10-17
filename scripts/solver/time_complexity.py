@@ -42,7 +42,7 @@ THREAD_ENV_KEYS = [
     "JULIA_NUM_THREADS",
 ]
 COMPONENT_COLUMNS = {
-    "fluid_core": "fluid_solver_step_time",
+    "fluid_interstep": "fluid_interstep_time",
     "fluid_callback": "fluid_step_time",
 }
 SOLID_COMPONENT_COLUMNS = {
@@ -317,18 +317,9 @@ def aggregate_run(run_dir: Path, configs: dict[str, dict[str, Any]], warm: int, 
     setup_crm = max((numeric(r.get("crm_setup_time"), 0.0) for r in rows), default=0.0)
     setup_rbf = max((numeric(r.get("rbf_setup_time"), 0.0) for r in rows), default=0.0)
     setup_geom = max((numeric(r.get("geometry_rbf_setup_time"), 0.0) for r in rows), default=0.0)
-    solid_wall_time = sum_column(solid_rows, "step_walltime", warm)
-    t_benchmark = components["fluid_core"] + components["fluid_callback"] + solid_wall_time
-    transfer = components["f_to_s"] + components["s_to_f"]
-    known = (
-        components["fluid_core"]
-        + components["fluid_callback"]
-        + components["solid"]
-        + transfer
-        + components["io"]
-    )
-    coupling_other = max(t_benchmark - known, 0.0)
-    components["other"] = coupling_other
+    # Structural solve/transfer/I/O occur while the fluid callback blocks for
+    # the solid response; they are sub-timers, not additive wall-clock phases.
+    t_benchmark = components["fluid_interstep"] + components["fluid_callback"]
     size = problem_size(configs, fluid_rows)
     out = {
         "sweep": sweep,
@@ -482,14 +473,19 @@ def main() -> None:
                     w.writeheader(); w.writerows(raw_rows)
                 write_aggregate(raw_rows, agg_csv)
                 print(f"[time_complexity] completed {case.name} run {run_id}")
-                split_names = ["fluid_core", "fluid_callback", "solid", "f_to_s", "s_to_f", "io", "other"]
+                split_names = ["fluid_interstep", "fluid_callback"]
                 split_text = ", ".join(
                     f"{name}={row.get(f't_{name}_s', math.nan):.3f}s" for name in split_names
                 )
                 print(
                     f"[time_complexity] post-warm-up component totals "
                     f"({row['n_benchmark_steps']} steps): {split_text}; "
-                    f"total={row['t_benchmark_s']:.3f}s"
+                    f"elapsed={row['t_benchmark_s']:.3f}s "
+                    f"(wall run={row['wall_total_s']:.3f}s); overlapping sub-timers: "
+                    f"solid={row.get('t_solid_s', math.nan):.3f}s, "
+                    f"F->S={row.get('t_f_to_s_s', math.nan):.3f}s, "
+                    f"S->F={row.get('t_s_to_f_s', math.nan):.3f}s, "
+                    f"I/O={row.get('t_io_s', math.nan):.3f}s"
                 )
     finally:
         restore_configs(snapshot)

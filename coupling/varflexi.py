@@ -354,7 +354,7 @@ class VarFlExICoupler:
                     "cd",
                     "solid_step_time",
                     "fluid_step_time",
-                    "fluid_solver_step_time",
+                    "fluid_interstep_time",
                 ]
             )
 
@@ -416,7 +416,7 @@ class VarFlExICoupler:
                 cl, cd = force_coefficients(relaxed_forces, q_inf, ref_area)
                 lift, drag = force_components(relaxed_forces)
                 fluid_step_time = optional_float(force_data, "fluid_step_time")
-                fluid_solver_step_time = optional_float(force_data, "fluid_solver_step_time")
+                fluid_interstep_time = optional_float(force_data, "fluid_interstep_time")
                 force_data["lift"] = lift
                 force_data["drag"] = drag
                 force_data["cl"] = cl
@@ -539,7 +539,7 @@ class VarFlExICoupler:
                         "cd": cd,
                         "solid_step_time": solid_step_time,
                         "fluid_step_time": fluid_step_time,
-                        "fluid_solver_step_time": fluid_solver_step_time,
+                        "fluid_interstep_time": fluid_interstep_time,
                     },
                     history_fp,
                 )
@@ -587,7 +587,7 @@ class VarFlExICoupler:
                         f"{float(cd):.6e}" if cd == cd else "nan",
                         f"{solid_step_time:.6e}" if solid_step_time == solid_step_time else "nan",
                         f"{fluid_step_time:.6e}" if fluid_step_time == fluid_step_time else "nan",
-                        f"{fluid_solver_step_time:.6e}" if fluid_solver_step_time == fluid_solver_step_time else "nan",
+                        f"{fluid_interstep_time:.6e}" if fluid_interstep_time == fluid_interstep_time else "nan",
                     ]
                 )
 

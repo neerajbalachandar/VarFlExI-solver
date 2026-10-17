@@ -45,11 +45,20 @@ struct SolverConfig
     nsteps_save::Int
     save_horseshoes::Bool
     save_geometry_csv::Bool
-    use_ftot_force::Bool
     debug_io::Bool
     regularize_vlm::Bool
     max_particles::Int
     max_particles_safety_factor::Float64
+    section_polar::String
+    section_polar_path::String
+    freestream_gradient::Vector{Float64}
+    freestream_oscillation::Vector{Float64}
+    freestream_frequency::Float64
+    freestream_phase::Float64
+    freestream_reference::Vector{Float64}
+    shed_boundarylayer::Bool
+    boundarylayer_prescribed_cd::Float64
+    boundarylayer_dipole_width::Float64
 
 end
 
@@ -126,7 +135,5 @@ mutable struct RuntimeState
     force_trace_io
 
     step_ref
-
-    use_ftot_force
 
 end
