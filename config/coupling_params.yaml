@@ -17,7 +17,8 @@ custom_span_stride: null
 force_transfer_mode: crm
 rbf_radius: 0.03
 rbf_neighbors: 24
-max_abs_force_component: 100.0
+# null disables component-wise force clipping; non-finite forces still error.
+max_abs_force_component: null
 
 enforce_chord_projection: false
 enforce_span_projection: false

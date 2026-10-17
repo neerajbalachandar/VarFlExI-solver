@@ -39,7 +39,14 @@ class CouplingTransfer:
         self.eta_cp_comm = np.array([self.eta_cp], dtype=float)
         self.rbf_radius = float(rbf_radius)
         self.rbf_neighbors = int(rbf_neighbors)
-        self.max_abs_force_component = float(max_abs_force_component)
+        self.max_abs_force_component = (
+            None if max_abs_force_component is None else float(max_abs_force_component)
+        )
+        if self.max_abs_force_component is not None and (
+            not np.isfinite(self.max_abs_force_component)
+            or self.max_abs_force_component <= 0.0
+        ):
+            raise ValueError("max_abs_force_component must be positive or null to disable clipping")
         self.edge_eval_xi_eps = float(edge_eval_xi_eps)
         self.work_conservative_mode = bool(work_conservative_mode)
         self.enforce_chord_projection = bool(enforce_chord_projection)
@@ -220,6 +227,18 @@ class CouplingTransfer:
 
         return grid_out.reshape((n_out, 3))
 
+    def limit_force_components(self, forces):
+        forces = np.asarray(forces, dtype=float)
+        if not np.all(np.isfinite(forces)):
+            raise RuntimeError("Non-finite aerodynamic force received during force transfer")
+        if self.max_abs_force_component is None:
+            return forces
+        return np.clip(
+            forces,
+            -self.max_abs_force_component,
+            self.max_abs_force_component,
+        )
+
     def parse_force_payload(self, data, n_span_out, n_chord_out, eta_span_out, eta_chord_out):
         eta_span_out = self.as_eta_array(eta_span_out, n_span_out)
         eta_chord_out = self.as_eta_array(eta_chord_out, n_chord_out)
@@ -261,9 +280,7 @@ class CouplingTransfer:
                     eta_span_out=eta_span_out,
                     eta_chord_out=eta_chord_out,
                 )
-                forces = np.clip(
-                    forces, -self.max_abs_force_component, self.max_abs_force_component
-                )
+                forces = self.limit_force_components(forces)
                 return forces, True
 
         forces_legacy = np.asarray(data.get("force", []), dtype=float).reshape(-1, 3)
@@ -274,7 +291,7 @@ class CouplingTransfer:
             eta_span_out=eta_span_out,
             eta_chord_out=eta_chord_out,
         )
-        forces = np.clip(forces, -self.max_abs_force_component, self.max_abs_force_component)
+        forces = self.limit_force_components(forces)
         return forces, False
 
     def build_spanwise_targets(self, eta_span_vals, xi_val, xi_eps=0.0):

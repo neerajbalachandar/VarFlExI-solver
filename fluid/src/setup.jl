@@ -99,6 +99,7 @@ aerodynamic_force_calculator = uns.generate_calc_aerodynamicforce(
 
 system = vlm.WingSystem()
 vlm.addwing(system, "Wing", wing)
+vlm.setVinf(system, Vinf)
 ensure_gamma!(system, vlm.get_m(system))
 previous_force_system = Ref(deepcopy(system))
 vehicle = uns.VLMVehicle(system; vlm_system=system, wake_system=system)
