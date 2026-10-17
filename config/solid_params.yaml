@@ -26,6 +26,9 @@ eta_m: 1.2
 eta_k: 5.0e-5
 kappa_shear: 0.833
 
+# von Karman membrane kinematics.  Set false to retain the linear baseline.
+geometric_nonlinearity: true
+
 alpha_m: 0.1
 alpha_f: 0.2
 

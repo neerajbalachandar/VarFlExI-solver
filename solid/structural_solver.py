@@ -167,6 +167,9 @@ class StructuralSolver:
             dt=self.dt,
             alpha_m=cfg_get(self.solid_config, "alpha_m", default=0.10),
             alpha_f=cfg_get(self.solid_config, "alpha_f", default=0.20),
+            geometric_nonlinearity=cfg_get(
+                self.solid_config, "geometric_nonlinearity", default=True
+            ),
         )
         self.model.build_residual_forms()
 

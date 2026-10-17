@@ -7,8 +7,15 @@ from .generalized_alpha import GeneralizedAlphaIntegrator
 
 
 class ReissnerMindlinModel:
-    """Mixed Reissner-Mindlin plate model with generalized-alpha time stepping.
-       Credits to fenics_shells for the original implementation of the Reissner-Mindlin model in FEniCS."""
+    """Mixed Reissner--Mindlin plate model with generalized-alpha time stepping.
+
+    When ``geometric_nonlinearity`` is enabled, membrane kinematics use the
+    von Karman approximation.  Rotations remain the independent, small
+    Reissner--Mindlin rotations: this is *not* a geometrically exact shell or
+    a finite-rotation/materially nonlinear model.
+
+    Credits to fenics_shells for the original Reissner--Mindlin implementation.
+    """
 
     def __init__(
         self,
@@ -22,6 +29,7 @@ class ReissnerMindlinModel:
         dt,
         alpha_m=0.10,
         alpha_f=0.20,
+        geometric_nonlinearity=True,
     ):
         self.domain = domain
         self.E = float(E)
@@ -33,6 +41,9 @@ class ReissnerMindlinModel:
         self.kappa_shear = Constant(float(kappa_shear))
         self.h = domain.h
         self.dt = dt
+        # Kept configurable so the previous linear formulation remains an
+        # available baseline without changing the mixed-space/FSI interfaces.
+        self.geometric_nonlinearity = bool(geometric_nonlinearity)
         self.integrator = GeneralizedAlphaIntegrator(dt, Constant(alpha_m), Constant(alpha_f))
         self.gamma = self.integrator.gamma
         self.beta = self.integrator.beta
@@ -99,7 +110,22 @@ class ReissnerMindlinModel:
         return split(q_fun)
 
     def membrane_strain(self, u_mem):
+        """Small (linear) membrane strain, retained for reference stiffness."""
         return sym(grad(u_mem))
+
+    def nonlinear_membrane_strain(self, u_mem, w):
+        """von Karman membrane strain at the current displacement state."""
+        grad_w = grad(w)
+        return self.membrane_strain(u_mem) + 0.5 * outer(grad_w, grad_w)
+
+    def nonlinear_membrane_variation(self, w, delta_w, delta_u):
+        """Consistent virtual von Karman membrane strain.
+
+        The transverse part contains the current ``w`` and virtual ``delta_w``;
+        evaluating ``nonlinear_membrane_strain(delta_u, delta_w)`` here would
+        be mathematically incorrect.
+        """
+        return self.membrane_strain(delta_u) + sym(outer(grad(w), grad(delta_w)))
 
     def curvature(self, theta):
         return sym(grad(theta))
@@ -108,9 +134,17 @@ class ReissnerMindlinModel:
         return grad(w) - theta
 
     def membrane_stress(self, u_mem):
+        """Linear membrane resultant used by the reference stiffness form."""
         eps = self.membrane_strain(u_mem)
+        return self.membrane_stress_from_strain(eps)
+
+    def membrane_stress_from_strain(self, eps):
         coeff = self.E * self.h / (1.0 - self.nu ** 2)
         return coeff * ((1.0 - self.nu) * eps + self.nu * tr(eps) * self.I2)
+
+    def nonlinear_membrane_stress(self, u_mem, w):
+        """Membrane resultant corresponding to von Karman membrane strain."""
+        return self.membrane_stress_from_strain(self.nonlinear_membrane_strain(u_mem, w))
 
     def bending_moment(self, theta):
         kap = self.curvature(theta)
@@ -138,6 +172,7 @@ class ReissnerMindlinModel:
         ) * dx
 
     def stiffness_form(self, q_trial, q_test):
+        """Linear elastic bilinear form and Rayleigh reference stiffness."""
         if isinstance(q_trial, tuple):
             u_t, w_t, theta_t = q_trial
         else:
@@ -164,13 +199,50 @@ class ReissnerMindlinModel:
         )
 
     def damping_form(self, q_trial, q_test):
+        """Reference/initial-stiffness Rayleigh damping.
+
+        ``eta_k`` multiplies the linear reference stiffness, not the nonlinear
+        internal-force functional.  This keeps C = eta_m M + eta_k K_ref a
+        velocity-linear damping operator with the original units/meaning.
+        """
         return self.eta_m * self.mass_form(q_trial, q_test) + self.eta_k * self.stiffness_form(
             q_trial, q_test
         )
 
     def external_work(self, q_test):
+        # The active FSI solver applies transferred nodal loads directly to its
+        # algebraic right-hand side.  It intentionally does not add this form
+        # to self.residual; doing both would double-count aerodynamic loading.
         v_disp = self.displacement_3d(q_test)
         return dot(v_disp, self.t_aero) * self.domain.ds_aero(1)
+
+    def internal_work(self, q_state, q_test):
+        """Internal virtual work at a displacement state.
+
+        In the nonlinear branch this is
+        int[N:delta(eps_NL) + M:delta(kappa) + Q.delta(gamma)] dOmega.
+        It is a residual (linear in ``q_test``), rather than a bilinear
+        stiffness form, so UFL can construct its complete consistent tangent.
+        """
+        u_mem, w, theta = self.split_state(q_state)
+        delta_u, delta_w, delta_theta = self.split_state(q_test)
+
+        if not self.geometric_nonlinearity:
+            return self.stiffness_form(q_state, q_test)
+
+        eps_virtual = self.nonlinear_membrane_variation(w, delta_w, delta_u)
+        N = self.nonlinear_membrane_stress(u_mem, w)
+        M = self.bending_moment(theta)
+        gamma = self.shear_strain(theta, w)
+        delta_kappa = self.curvature(delta_theta)
+        delta_gamma = self.shear_strain(delta_theta, delta_w)
+        G_shear = Constant(self.E / (2.0 * (1.0 + self.nu)))
+        K_shear = self.kappa_shear * G_shear * self.h
+        return (
+            inner(N, eps_virtual) * dx
+            + inner(M, delta_kappa) * dx
+            + K_shear * inner(gamma, delta_gamma) * dx
+        )
 
     def build_residual_forms(self):
         q_u, q_w, q_th = split(self.q)
@@ -205,8 +277,12 @@ class ReissnerMindlinModel:
         self.residual = (
             self.mass_form(a_alpha, self.q_test)
             + self.damping_form(v_alpha, self.q_test)
-            + self.stiffness_form(q_alpha, self.q_test)
+            # Internal force is evaluated at q_{n+alpha_f}, consistently with
+            # the existing generalized-alpha displacement interpolation.
+            + self.internal_work(q_alpha, self.q_test)
         )
+        # Differentiating the complete residual includes material and geometric
+        # tangent terms from the quadratic von Karman membrane kinematics.
         self.jacobian = derivative(self.residual, self.q, self.dq_trial)
         return self.residual, self.jacobian
 
@@ -215,8 +291,14 @@ class ReissnerMindlinModel:
 
     def compute_strain_energy(self):
         u_mem_t, w_t, theta_t = split(self.q_old)
+        if self.geometric_nonlinearity:
+            eps_mem = self.nonlinear_membrane_strain(u_mem_t, w_t)
+            N_mem = self.membrane_stress_from_strain(eps_mem)
+        else:
+            eps_mem = self.membrane_strain(u_mem_t)
+            N_mem = self.membrane_stress_from_strain(eps_mem)
         return assemble(
-            0.5 * inner(self.membrane_stress(u_mem_t), self.membrane_strain(u_mem_t)) * dx
+            0.5 * inner(N_mem, eps_mem) * dx
             + 0.5 * inner(self.bending_moment(theta_t), self.curvature(theta_t)) * dx
             + 0.5
             * self.kappa_shear
