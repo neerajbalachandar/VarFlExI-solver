@@ -1,31 +1,37 @@
 from dolfin import *
+from .generalized_alpha_coefficients import acceleration, intermediate, parameters, velocity
 
 
 class GeneralizedAlphaIntegrator:
-    """Generalized-alpha time integration method, credits to FEniCs 
-        for their open source elastodynamics integration scheme implementation."""
+    """Generalized-alpha method with old-state weight ``alpha_m/alpha_f``.
+
+    ``average(old,new,alpha) = alpha*old + (1-alpha)*new``. The model thus
+    evaluates inertia at ``a_(n+alpha_m)`` and damping/internal force at
+    ``v_(n+alpha_f)`` / ``q_(n+alpha_f)``. Kinematic updates follow the
+    Newmark forms using ``gamma=.5+alpha_f-alpha_m`` and
+    ``beta=(gamma+.5)^2/4``.
+    """
 
     def __init__(self, dt, alpha_m, alpha_f):
         self.dt = dt
         self.alpha_m = alpha_m
         self.alpha_f = alpha_f
-        self.gamma = Constant(0.5 + self.alpha_f - self.alpha_m)
-        self.beta = Constant((self.gamma + 0.5) ** 2 / 4.0)
+        gamma, beta = parameters(float(self.alpha_m), float(self.alpha_f))
+        self.gamma = Constant(gamma)
+        self.beta = Constant(beta)
 
     def average(self, x_old, x_new, alpha):
-        return alpha * x_old + (1.0 - alpha) * x_new
+        return intermediate(x_old, x_new, alpha)
 
     def update_a(self, q_new, q_prev, v_prev, a_prev, ufl=True):
         dt_ = self.dt if ufl else float(self.dt)
         beta_ = self.beta if ufl else float(self.beta)
-        return (q_new - q_prev - dt_ * v_prev) / beta_ / dt_ ** 2 - (
-            1.0 - 2.0 * beta_
-        ) / (2.0 * beta_) * a_prev
+        return acceleration(q_new, q_prev, v_prev, a_prev, dt_, beta_)
 
     def update_v(self, a_new, q_prev, v_prev, a_prev, ufl=True):
         dt_ = self.dt if ufl else float(self.dt)
         gamma_ = self.gamma if ufl else float(self.gamma)
-        return v_prev + dt_ * ((1.0 - gamma_) * a_prev + gamma_ * a_new)
+        return velocity(a_new, v_prev, a_prev, dt_, gamma_)
 
     def update_fields(self, q_fun, q_prev, v_prev, a_prev):
         q_vec = q_fun.vector()

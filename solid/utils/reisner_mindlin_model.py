@@ -266,6 +266,27 @@ class ReissnerMindlinModel:
             + K_shear * inner(gamma, delta_gamma) * dx
         )
 
+    def manufactured_weak_load(self, q_state, velocity_state, acceleration_state, q_test):
+        """Evaluate the production inertial, damping, and internal weak operators.
+
+        This is the continuous-equation MMS load functional. It deliberately
+        returns a variational form, not a reconstructed pointwise body force,
+        so the verification uses the constitutive and damping operators that
+        the solver actually advances. ``q_state``, velocity and acceleration
+        are supplied at one common physical time. For a continuous-equation
+        MMS, this time is the force evaluation time t_(n+1-alpha_f*dt); do not
+        pass mixed alpha_m/alpha_f stage states here. The production residual
+        separately retains its generalized-alpha stage evaluation. The state
+        coefficients must be mesh-attached UFL fields (for example Functions
+        or tuples of Functions), not bare DOLFIN Expressions, because these
+        forms take spatial gradients.
+        """
+        return (
+            self.mass_form(acceleration_state, q_test)
+            + self.damping_form(velocity_state, q_test)
+            + self.internal_work(q_state, q_test)
+        )
+
     def build_residual_forms(self):
         q_u, q_w, q_th = split(self.q)
         qo_u, qo_w, qo_th = split(self.q_old)

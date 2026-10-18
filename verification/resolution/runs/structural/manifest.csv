@@ -1,4 +1,0 @@
-study,case,factor_or_value,config_dir,dt_s,h_s_chord_m,h_s_span_m,h_vlm_span_m,h_particle_release_m,sigma_particle_initial_m,C_p,Fo_p,execution
-structural,coarse,0.5,/home/dysco/FLOWUnsteady/VarFLEXI-rVPM-Fenics/verification/resolution/runs/structural/coarse/config,0.001,0.016,0.012,0.012,0.00375,0.0075,4.0,0.001066666666666667,NOT_RUN
-structural,baseline,1.0,/home/dysco/FLOWUnsteady/VarFLEXI-rVPM-Fenics/verification/resolution/runs/structural/baseline/config,0.001,0.008,0.006,0.012,0.00375,0.0075,4.0,0.001066666666666667,NOT_RUN
-structural,fine,2.0,/home/dysco/FLOWUnsteady/VarFLEXI-rVPM-Fenics/verification/resolution/runs/structural/fine/config,0.001,0.004,0.003,0.012,0.00375,0.0075,4.0,0.001066666666666667,NOT_RUN

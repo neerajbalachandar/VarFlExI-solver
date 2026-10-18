@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-"""Plan or run spatial/temporal Reissner-Mindlin MMS refinements."""
+"""Plan or execute separate spatial/temporal plate MMS convergence studies.
+
+Spatial mode refines both in-plane mesh directions while keeping dt fixed.
+Temporal mode refines dt on a fixed mesh. Each solve compares the numerical
+plate fields to the same analytic manufactured solution; adjacent error ratios
+are used to estimate observed order. Nothing runs unless ``--execute`` is set.
+"""
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import matplotlib
@@ -20,9 +28,25 @@ OUT = HERE / "results"
 
 
 def cases(study):
+    # These levels intentionally refine a single variable family at a time.
+    # Spatial: five simultaneous uniform refinements with dt held small enough
+    # that the second-order time error is intended to sit below spatial error.
+    # Temporal: six halvings of dt at fixed mesh and fixed physical final time.
     if study == "spatial":
-        return [{"nx": n, "ny": 4*n//3, "dt": 0.0005, "duration": 0.01} for n in (6, 12, 24)]
-    return [{"nx": 24, "ny": 64, "dt": dt, "duration": 0.05} for dt in (0.01, 0.005, 0.0025, 0.00125)]
+        return [{"nx": n, "ny": 4*n//3, "dt": 0.0000625, "duration": 0.01}
+                for n in (6, 12, 24, 48, 96)]
+    return [{"nx": 48, "ny": 128, "dt": 0.01 / (2**level), "duration": 0.05}
+            for level in range(6)]
+
+
+def pair_order(coarse_error, fine_error, ratio):
+    """Return a measured pairwise rate only for valid positive finite data."""
+    coarse_error, fine_error, ratio = map(float, (coarse_error, fine_error, ratio))
+    if not all(math.isfinite(value) for value in (coarse_error, fine_error, ratio)):
+        return ""
+    if coarse_error <= 0.0 or fine_error <= 0.0 or ratio <= 1.0:
+        return ""
+    return math.log(coarse_error / fine_error) / math.log(ratio)
 
 
 def main():
@@ -32,16 +56,45 @@ def main():
     parser.add_argument("--formulation", choices=("linear", "nonlinear", "both"), default="both")
     parser.add_argument("--config-dir", default=str(ROOT / "config"))
     args = parser.parse_args()
+    with open(Path(args.config_dir) / "solid_params.yaml") as stream:
+        import yaml
+        solid_cfg = yaml.safe_load(stream)
+    chord = float(solid_cfg["root_chord"])
+    span = float(solid_cfg["span"])
     planned = cases(args.study)
     formulations = ("linear", "nonlinear") if args.formulation == "both" else (args.formulation,)
     OUT.mkdir(parents=True, exist_ok=True)
+    config_path = Path(args.config_dir) / "solid_params.yaml"
+    config_hash = hashlib.sha256(config_path.read_bytes()).hexdigest()
     plan_path = OUT / f"plate_{args.study}_plan.json"
-    plan_path.write_text(json.dumps({"executed": args.execute, "formulations": formulations, "cases": planned}, indent=2))
+    plan_path.write_text(json.dumps({
+        "executed": args.execute,
+        "formulations": formulations,
+        "cases": planned,
+        "spatial_spacing_definition": "max(root_chord/nx, span/ny)",
+        "root_chord_m": chord,
+        "span_m": span,
+        "solid_config_path": str(config_path.resolve()),
+        "solid_config_sha256": config_hash,
+        "error_for_order": "pairwise orders are written for all *_relative_l2 fields",
+        "spatial_note": "hx and hy refine together; report both, and use max(hx,hy) only for a scalar rate axis",
+        "mesh_aspect_ratio_note": "hx/hy is recorded per run; both nx and ny refine together",
+        "temporal_note": "six dt levels; fixed 48x128 mesh and 0.05 s final time",
+    }, indent=2))
     if not args.execute:
         print(f"Wrote plan {plan_path}; no simulations run. Add --execute in fenics-env.")
         return
     raw = OUT / f"plate_{args.study}_raw.csv"
     raw.unlink(missing_ok=True)
+    manifest_path = OUT / f"plate_{args.study}_manifest.json"
+    manifest = {
+        "study": args.study,
+        "started_utc": datetime.now(timezone.utc).isoformat(),
+        "python_executable": sys.executable,
+        "solid_config_path": str(config_path.resolve()),
+        "solid_config_sha256": config_hash,
+        "cases": [],
+    }
     for formulation in formulations:
         for case in planned:
             command = [sys.executable, str(HERE / "fenics_plate.py"), "--config-dir", args.config_dir,
@@ -49,39 +102,85 @@ def main():
                        "--duration", str(case["duration"]), "--output", str(raw)]
             if formulation == "nonlinear":
                 command.append("--nonlinear")
-            subprocess.run(command, cwd=ROOT, check=True)
+            record = {"formulation": formulation, **case, "command": command,
+                      "status": "running", "return_code": None}
+            manifest["cases"].append(record)
+            manifest_path.write_text(json.dumps(manifest, indent=2))
+            try:
+                completed = subprocess.run(command, cwd=ROOT, check=False)
+                record["return_code"] = completed.returncode
+                record["status"] = "completed" if completed.returncode == 0 else "failed"
+                manifest_path.write_text(json.dumps(manifest, indent=2))
+                if completed.returncode != 0:
+                    raise subprocess.CalledProcessError(completed.returncode, command)
+            except Exception as exc:
+                record["status"] = "failed"
+                record["error"] = repr(exc)
+                manifest_path.write_text(json.dumps(manifest, indent=2))
+                raise
     rows = list(csv.DictReader(raw.open()))
-    value_key = "transverse_w_relative_l2"
+    if not rows:
+        raise RuntimeError(f"No plate MMS rows were produced; see {manifest_path}")
+    expected_count = len(planned) * len(formulations)
+    if len(rows) != expected_count:
+        raise RuntimeError(f"Expected {expected_count} completed case rows, found {len(rows)}")
+    case_keys = set()
+    for row in rows:
+        key = (row["formulation"], int(row["nx"]), int(row["ny"]), float(row["dt_s"]))
+        if key in case_keys:
+            raise RuntimeError(f"Duplicate refinement result row: {key}")
+        case_keys.add(key)
+        if row.get("run_status") != "completed" or row.get("solid_config_sha256") != config_hash:
+            raise RuntimeError(f"Incomplete or config-mismatched result row: {key}")
+    expected_keys = {
+        (formulation, case["nx"], case["ny"], case["dt"])
+        for formulation in formulations for case in planned
+    }
+    if case_keys != expected_keys:
+        raise RuntimeError("Completed case rows do not match the requested refinement levels")
+    expected_durations = {round(float(case["duration"]), 12) for case in planned}
+    actual_durations = {round(float(row["duration_s"]), 12) for row in rows}
+    if actual_durations != expected_durations:
+        raise RuntimeError(
+            f"Cases do not share the intended final time(s): expected {expected_durations}, got {actual_durations}"
+        )
+    error_keys = [key for key in rows[0] if key.endswith("_relative_l2")]
     for formulation in formulations:
         selected = [row for row in rows if row["formulation"] == formulation]
-        selected.sort(key=lambda row: float(row["dt_s"]) if args.study == "temporal" else int(row["nx"]))
-        if args.study == "spatial":
-            selected.sort(key=lambda row: int(row["nx"]), reverse=True)
+        # Order levels coarse-to-fine so both log(error ratio) and log(refinement
+        # ratio) have the same sign for a convergent solution.
+        selected.sort(
+            key=lambda row: float(row["dt_s"]) if args.study == "temporal" else int(row["nx"]),
+            reverse=True,
+        )
         for i, row in enumerate(selected):
-            if i == 0:
-                row["observed_order"] = ""
-                continue
-            prev = selected[i - 1]
+            prev = selected[i - 1] if i else None
             if args.study == "spatial":
-                coarse_h = max(0.24/int(prev["nx"]), 0.96/int(prev["ny"]))
-                fine_h = max(0.24/int(row["nx"]), 0.96/int(row["ny"]))
-                ratio = coarse_h / fine_h
+                ratio = (max(chord/int(prev["nx"]), span/int(prev["ny"])) /
+                         max(chord/int(row["nx"]), span/int(row["ny"]))) if prev else 0.0
             else:
-                ratio = float(prev["dt_s"]) / float(row["dt_s"])
-            row["observed_order"] = math.log(float(prev[value_key])/float(row[value_key])) / math.log(ratio)
+                ratio = float(prev["dt_s"]) / float(row["dt_s"]) if prev else 0.0
+            for error_key in error_keys:
+                row[f"{error_key}_observed_order"] = (
+                    pair_order(prev[error_key], row[error_key], ratio) if prev else ""
+                )
     with open(OUT / f"plate_{args.study}_convergence.csv", "w", newline="") as stream:
-        columns = list(rows[0]) + (["observed_order"] if "observed_order" not in rows[0] else [])
+        columns = list(dict.fromkeys(key for row in rows for key in row))
         writer = csv.DictWriter(stream, fieldnames=columns)
         writer.writeheader()
         writer.writerows(rows)
+    manifest["finished_utc"] = datetime.now(timezone.utc).isoformat()
+    manifest["convergence_csv"] = str((OUT / f"plate_{args.study}_convergence.csv").resolve())
+    manifest["all_cases_completed"] = all(case["status"] == "completed" for case in manifest["cases"])
+    manifest_path.write_text(json.dumps(manifest, indent=2))
     fig, ax = plt.subplots(figsize=(6.8, 4.4), constrained_layout=True)
     for formulation in formulations:
         selected = [row for row in rows if row["formulation"] == formulation]
-        x = [max(0.24/int(row["nx"]), 0.96/int(row["ny"])) if args.study == "spatial" else float(row["dt_s"]) for row in selected]
-        y = [float(row[value_key]) for row in selected]
+        x = [max(chord/int(row["nx"]), span/int(row["ny"])) if args.study == "spatial" else float(row["dt_s"]) for row in selected]
+        y = [float(row["transverse_w_relative_l2"]) for row in selected]
         order = np.argsort(x)
         ax.loglog(np.asarray(x)[order], np.asarray(y)[order], "o-", label=formulation)
-    ax.set(xlabel="Mesh spacing h [m]" if args.study == "spatial" else "Time step dt [s]",
+    ax.set(xlabel="max(hx, hy) [m]" if args.study == "spatial" else "Time step dt [s]",
            ylabel="Relative transverse-displacement L2 error", title=f"Structural MMS {args.study} refinement")
     ax.grid(True, which="both", alpha=0.25)
     ax.legend()

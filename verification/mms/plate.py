@@ -2,6 +2,12 @@
 
 The equations below are independently assembled from the constitutive laws in
 solid/utils/reisner_mindlin_model.py; they do not call the FEniCS residual.
+
+The smooth spatial envelope is B(x,y)=sin(pi*x/Lx)^4*sin(pi*y/Ly)^4.
+Fields are u_x=1e-4 B cos(2.3t), u_y=1e-4 B sin(2.3t),
+w=1e-3 B sin(2.3t), theta_x=1e-3 B cos(2.3t), and
+theta_y=-1e-3 B sin(2.3t), in SI units. Symbolic body loads are obtained by
+substituting these fields into the plate's strong equilibrium equations.
 """
 
 from dataclasses import dataclass
@@ -37,9 +43,8 @@ def make_plate_mms(config, nonlinear, include_quadratic_inplane=True):
     kappa = sp.Float(config["kappa_shear"])
     omega = sp.Float("2.3")
 
-    # Fourth-order edge zeros make the exact field clamped at the root and
-    # eliminate membrane traction, bending moment, and transverse shear on
-    # the other external edges.
+    # Fourth-order zeros make the exact field and required derivatives vanish
+    # at the clamped y=0 root and satisfy the natural free-edge conditions.
     bump = sp.sin(sp.pi * x / Lx) ** 4 * sp.sin(sp.pi * y / Ly) ** 4
     u = sp.Matrix([
         sp.Float("1e-4") * bump * sp.cos(omega * t),

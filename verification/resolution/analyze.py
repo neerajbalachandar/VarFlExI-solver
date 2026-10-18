@@ -7,6 +7,7 @@ live below verification/resolution/runs and never edit config/ in place.
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import os
@@ -164,7 +165,7 @@ Generated from `config/fluid_params.yaml`, `solid_params.yaml`, and `coupling_pa
 | Coupling stations | {scales['n_coupling_span']} | independent `comm_nspan` |
 | Wake release spacing estimate | {scales['h_particle_release_m']:.6g} m | U dt / particles_per_step for uniform stream-aligned release |
 | Initial wake core radius | {scales['sigma_particle_initial_m']:.6g} m | lambda_vpm U dt / particles_per_step |
-| Particle diagnostics | C_p={scales['C_p_Udt_over_hp']:.6g}; Fo_p={scales['Fo_p_nu_dt_over_hp2']:.6g} | diagnostics, not stability theorems |
+| Particle scale diagnostics | U*dt/hp={scales['C_p_Udt_over_hp']:.6g} (=particles_per_step under uniform release); Fo_p={scales['Fo_p_nu_dt_over_hp2']:.6g} | descriptive ratios, not stability limits |
 | Synthetic gust period | {scales['gust_period_s']:.6g} s | prescribed config frequency |
 | Cantilever-strip frequency estimate | {scales['beam_approx_frequency_hz']:.6g} Hz | preliminary beam approximation, not FEM eigenanalysis |
 | Particle integrator / formulation | {scales['integration']} / {scales['formulation']} | FLOWUnsteady defaults at installed version |
@@ -268,8 +269,18 @@ def plan_study(study, execute=False):
         for key, filename in (("fluid", "fluid_params.yaml"), ("solid", "solid_params.yaml"), ("coupling", "coupling_params.yaml")):
             with open(config_dir / filename, "w") as stream:
                 yaml.dump(c[key], stream, Dumper=InlineListDumper, sort_keys=False)
+        config_hash = hashlib.sha256()
+        for filename in ("fluid_params.yaml", "solid_params.yaml", "coupling_params.yaml"):
+            config_hash.update((config_dir / filename).read_bytes())
         manifest.append({"study": study, "case": tag, "factor_or_value": value,
-                         "config_dir": str(config_dir), "dt_s": derived["dt_s"],
+                         "config_dir": str(config_dir), "results_dir": c["solid"]["results_root"],
+                         "dt_s": derived["dt_s"],
+                         "total_time_s": float(c["coupling"]["total_time"]),
+                         "n_steps": int(c["coupling"]["n_steps"]),
+                         "nx_solid": int(c["solid"]["nx"]), "ny_solid": int(c["solid"]["ny"]),
+                         "n_vlm_span": int(c["fluid"].get("n_span", 1)),
+                         "particles_per_step": int(c["fluid"]["particles_per_step"]),
+                         "config_sha256": config_hash.hexdigest(),
                          "h_s_chord_m": derived["h_s_chord_m"], "h_s_span_m": derived["h_s_span_m"],
                          "h_vlm_span_m": derived["h_vlm_span_m"],
                          "h_particle_release_m": derived["h_particle_release_m"],
@@ -278,8 +289,13 @@ def plan_study(study, execute=False):
                          "execution": "NOT_RUN"})
         if execute:
             env = dict(os.environ, VARFLEXI_CONFIG_DIR=str(config_dir))
-            result = subprocess.run([str(ROOT / "run.sh")], cwd=ROOT, env=env, check=False)
+            result = subprocess.run([str(ROOT / "run.sh")], cwd=ROOT, env=env,
+                                    check=False, capture_output=True, text=True)
             manifest[-1]["execution"] = "PASS" if result.returncode == 0 else f"FAILED({result.returncode})"
+            manifest[-1]["returncode"] = result.returncode
+            (case_dir / "run.log").write_text(
+                "=== stdout ===\n" + result.stdout + "\n=== stderr ===\n" + result.stderr
+            )
     out = RUNS / study
     with open(out / "manifest.csv", "w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(manifest[0]))

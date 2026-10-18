@@ -7,8 +7,11 @@ is derived symbolically in plate.py, not from the assembled FEM residual.
 
 import argparse
 import csv
+import hashlib
 import re
+import shlex
 import sys
+from time import perf_counter
 from pathlib import Path
 
 import numpy as np
@@ -20,9 +23,9 @@ from plate import make_plate_mms
 
 try:
     from dolfin import (
-        Constant, Expression, Function, FunctionAssigner, TestFunction,
+        Constant, Expression, Function, FunctionAssigner,
         VectorFunctionSpace, assemble, derivative, dx, interpolate, inner,
-        parameters, split, dot, solve,
+        parameters, split, solve,
     )
 except ImportError as exc:
     raise SystemExit(f"FEniCS plate MMS requires legacy dolfin: {exc}") from exc
@@ -38,16 +41,22 @@ def expression_code(expr):
 
 
 def scalar_expr(expr, time=0.0):
-    return Expression(expression_code(expr), degree=8, t=float(time))
+    return Expression(expression_code(expr), degree=16, t=float(time))
 
 
 def vector_expr(expr, time=0.0):
-    return Expression(tuple(expression_code(expr[i]) for i in range(len(expr))), degree=8, t=float(time))
+    return Expression(tuple(expression_code(expr[i]) for i in range(len(expr))), degree=16, t=float(time))
 
 
 def tensor_vector_expr(expr, time):
     values = tuple(expression_code(expr[i, j]) for i in range(2) for j in range(2))
-    return Expression(values, degree=8, t=float(time))
+    return Expression(values, degree=16, t=float(time))
+
+
+def expression_state(fields, time=0.0):
+    """Create the exact (u,w,theta) fields as time-updateable DOLFIN values."""
+    u, w, theta = fields
+    return (vector_expr(u, time), scalar_expr(w, time), vector_expr(theta, time))
 
 
 def make_mixed_function(model, exact_fields, time, spaces, assigner):
@@ -62,7 +71,22 @@ def make_mixed_function(model, exact_fields, time, spaces, assigner):
     return result
 
 
+def state_l2_error_and_reference(q_function, exact_expressions, time):
+    """Return componentwise squared L2 error/reference norms at one time."""
+    numerical = split(q_function)
+    for expression in exact_expressions:
+        expression.t = time
+    errors, references = [], []
+    for value, exact in zip(numerical, exact_expressions):
+        error_sq = float(assemble(inner(value - exact, value - exact) * dx))
+        reference_sq = float(assemble(inner(exact, exact) * dx))
+        errors.append(max(error_sq, 0.0))
+        references.append(max(reference_sq, 0.0))
+    return errors, references
+
+
 def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv):
+    wall_start = perf_counter()
     with open(Path(config_dir) / "solid_params.yaml") as stream:
         cfg = yaml.safe_load(stream)
     mms = make_plate_mms(cfg, nonlinear, cfg.get("include_quadratic_inplane_strain", True))
@@ -80,33 +104,62 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv):
     assigner = FunctionAssigner(model.V, spaces)
     exact_u, exact_w, exact_theta = mms.fields
     exact_fields = (exact_u, exact_w, exact_theta)
-    f_u, f_w, f_theta = mms.loads
-    q_test = split(model.q_test)
-    source = (
-        dot(vector_expr(f_u), q_test[0])
-        + scalar_expr(f_w) * q_test[1]
-        + dot(vector_expr(f_theta), q_test[2])
-    ) * dx
+    exact_velocity = tuple(value.diff(mms.t) for value in exact_fields)
+    exact_acceleration = tuple(value.diff(mms.t, 2) for value in exact_fields)
+    # UFL differential operators such as grad() need coefficients tied to a
+    # mesh. Plain legacy DOLFIN Expressions have no geometric dimension, so
+    # interpolate the manufactured states into the production mixed space.
+    q_star = Function(model.V, name="ManufacturedDisplacement")
+    v_star = Function(model.V, name="ManufacturedVelocity")
+    a_star = Function(model.V, name="ManufacturedAcceleration")
+    # Continuous-equation MMS: use production weak operators to build the
+    # continuous load, but evaluate every manufactured field at one physical
+    # force time. The generalized-alpha residual still uses its own alpha_m/f
+    # stages, so its time-discretization error is not canceled by the forcing.
+    source = model.manufactured_weak_load(q_star, v_star, a_star, model.q_test)
     model.jacobian = derivative(model.residual, model.q, model.dq_trial)
+    newton_atol = float(cfg.get("newton_atol", 1.0e-8))
+    newton_rtol = float(cfg.get("newton_rtol", 1.0e-6))
+    newton_maxit = int(cfg.get("newton_maxiter", cfg.get("newton_maxit", 20)))
 
     model.q_old.assign(make_mixed_function(model, exact_fields, 0, spaces, assigner))
     model.q.assign(model.q_old)
     model.v_old.assign(make_mixed_function(model, tuple(v.diff(mms.t) for v in exact_fields), 0, spaces, assigner))
     model.a_old.assign(make_mixed_function(model, tuple(v.diff(mms.t, 2) for v in exact_fields), 0, spaces, assigner))
+    q0 = split(model.q_old)
+    exact_error_fields = (vector_expr(exact_u, 0.0), scalar_expr(exact_w, 0.0),
+                           vector_expr(exact_theta, 0.0))
+    initial_projection_errors = [
+        float(np.sqrt(assemble(inner(q0[i] - exact_error_fields[i], q0[i] - exact_error_fields[i]) * dx)))
+        for i in range(3)
+    ]
+    exact_velocity_fields = expression_state(exact_velocity, 0.0)
+    exact_acceleration_fields = expression_state(exact_acceleration, 0.0)
+    initial_velocity_errors, _ = state_l2_error_and_reference(
+        model.v_old, exact_velocity_fields, 0.0
+    )
+    initial_acceleration_errors, _ = state_l2_error_and_reference(
+        model.a_old, exact_acceleration_fields, 0.0
+    )
+    initial_velocity_projection_errors = [float(np.sqrt(value)) for value in initial_velocity_errors]
+    initial_acceleration_projection_errors = [float(np.sqrt(value)) for value in initial_acceleration_errors]
+    integrated_error_sq = np.zeros(3)
+    integrated_reference_sq = np.zeros(3)
+    previous_errors, previous_references = state_l2_error_and_reference(model.q_old, exact_error_fields, 0.0)
 
     nsteps = int(round(duration / dt))
     for step in range(1, nsteps + 1):
-        # The load is evaluated at t_(n+1-alpha_f), matching the residual's
-        # internal-force time level. Acceleration/velocity use the integrator's
-        # actual discrete update from q_n, v_n, and a_n.
-        t_force = step * dt - float(cfg.get("alpha_f", 0.2)) * dt
-        for expr in source.coefficients():
-            if hasattr(expr, "t"):
-                expr.t = t_force
+        # The applied continuous load is sampled at the production force time
+        # t_f=t_(n+1)-alpha_f*dt. In contrast, model.residual uses a_(n+alpha_m)
+        # and q/v_(n+alpha_f), exactly as the generalized-alpha method requires.
+        t_alpha_f = step * dt - float(cfg.get("alpha_f", 0.2)) * dt
+        q_star.assign(make_mixed_function(model, exact_fields, t_alpha_f, spaces, assigner))
+        v_star.assign(make_mixed_function(model, exact_velocity, t_alpha_f, spaces, assigner))
+        a_star.assign(make_mixed_function(model, exact_acceleration, t_alpha_f, spaces, assigner))
         force_vector = assemble(source)
         converged = False
         initial_norm = None
-        for iteration in range(30):
+        for iteration in range(newton_maxit):
             A = assemble(model.jacobian)
             rhs = assemble(model.residual)
             rhs *= -1.0
@@ -115,15 +168,24 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv):
                 bc.apply(A, rhs)
             norm = rhs.norm("l2")
             initial_norm = norm if initial_norm is None else initial_norm
-            if norm < 1.0e-8 or norm / max(initial_norm, 1e-30) < 1.0e-8:
+            if norm <= newton_atol or norm / max(initial_norm, 1e-30) <= newton_rtol:
                 converged = True
                 break
             solve(A, model.dq_newton.vector(), rhs, "mumps")
             model.q.vector().axpy(1.0, model.dq_newton.vector())
             model.q.vector().apply("insert")
         if not converged:
-            raise RuntimeError(f"MMS Newton solve failed at step {step}: residual={norm:.4e}")
+            raise RuntimeError(
+                f"MMS Newton solve failed at step {step}: residual={norm:.4e}, "
+                f"atol={newton_atol:.3e}, rtol={newton_rtol:.3e}, maxit={newton_maxit}"
+            )
         model.update_fields()
+        current_errors, current_references = state_l2_error_and_reference(
+            model.q_old, exact_error_fields, step * dt
+        )
+        integrated_error_sq += 0.5 * dt * (np.asarray(previous_errors) + np.asarray(current_errors))
+        integrated_reference_sq += 0.5 * dt * (np.asarray(previous_references) + np.asarray(current_references))
+        previous_errors, previous_references = current_errors, current_references
 
     q_num = split(model.q_old)
     final_time = nsteps * dt
@@ -138,10 +200,35 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv):
     names = ("inplane_u_l2", "transverse_w_l2", "rotation_theta_l2")
     row = {"formulation": "nonlinear" if nonlinear else "linear", "nx": nx, "ny": ny,
            "dt_s": dt, "duration_s": final_time, "steps": nsteps,
+           "run_status": "completed",
+           "command": shlex.join([sys.executable, *sys.argv]),
+           "solid_config_sha256": hashlib.sha256(
+               (Path(config_dir) / "solid_params.yaml").read_bytes()
+           ).hexdigest(),
+           "continuous_force_time": "t_(n+1)-alpha_f*dt; q*, v*, and a* all evaluated at this time",
+           "hx_m": cfg["root_chord"] / nx, "hy_m": cfg["span"] / ny,
+           "hx_over_hy": (cfg["root_chord"] / nx) / (cfg["span"] / ny),
+           "dofs": model.V.dim(), "initial_projection_u_l2_m": initial_projection_errors[0],
+           "initial_projection_w_l2_m": initial_projection_errors[1],
+           "initial_projection_theta_l2": initial_projection_errors[2],
+           "initial_velocity_projection_u_l2_m_s": initial_velocity_projection_errors[0],
+           "initial_velocity_projection_w_l2_m_s": initial_velocity_projection_errors[1],
+           "initial_velocity_projection_theta_l2_s": initial_velocity_projection_errors[2],
+           "initial_acceleration_projection_u_l2_m_s2": initial_acceleration_projection_errors[0],
+           "initial_acceleration_projection_w_l2_m_s2": initial_acceleration_projection_errors[1],
+           "initial_acceleration_projection_theta_l2_s2": initial_acceleration_projection_errors[2],
+           "newton_atol": newton_atol, "newton_rtol": newton_rtol,
+           "newton_maxit": newton_maxit,
            "newton_iterations_last_step": iteration + 1, "newton_residual_last_step": norm}
     for name, error, ref in zip(names, errors, refs):
         row[name] = error
         row[name.replace("_l2", "_relative_l2")] = error / ref if ref > 1e-15 else error
+    for name, error_sq, ref_sq in zip(("inplane_u", "transverse_w", "rotation_theta"),
+                                      integrated_error_sq, integrated_reference_sq):
+        row[f"{name}_time_integrated_l2"] = float(np.sqrt(error_sq))
+        row[f"{name}_time_integrated_relative_l2"] = (
+            float(np.sqrt(error_sq / ref_sq)) if ref_sq > 1.0e-30 else float(np.sqrt(error_sq))
+        )
     for comp, label in enumerate(("u_x", "u_y")):
         err = float(np.sqrt(assemble((q_num[0][comp] - q_ref[0][comp])**2 * dx)))
         ref = float(np.sqrt(assemble(q_ref[0][comp]**2 * dx)))
@@ -218,6 +305,7 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv):
     fig.colorbar(contour, ax=axes[2], label="w error [mm]")
     fig.savefig(field_dir / f"plate_{row['formulation']}_{nx}x{ny}_field_error.png", dpi=170)
     plt.close(fig)
+    row["wall_runtime_s"] = perf_counter() - wall_start
     out_csv = Path(out_csv)
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     is_new = not out_csv.exists()

@@ -10,6 +10,7 @@ import csv
 import sys
 from pathlib import Path
 
+import numpy as np
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -56,8 +57,14 @@ def main():
         k_form = model.stiffness_form(model.dq_trial, model.q_test)
     m_form = model.mass_form(model.dq_trial, model.q_test)
     K, M = assemble(k_form), assemble(m_form)
+    zero_rhs = Function(model.V).vector()
+    zero_rhs.zero()
     for bc in model.bcs:
+        # K gets the usual identity diagonal on constrained DOFs. For the
+        # generalized eigenproblem, remove constrained rows AND columns from
+        # M; zeroing rows alone would make M nonsymmetric and contaminate modes.
         bc.apply(K)
+        bc.zero_columns(M, zero_rhs, 0.0)
         bc.zero(M)
     eigensolver = SLEPcEigenSolver(K, M)
     eigensolver.parameters["problem_type"] = "gen_hermitian"
@@ -65,13 +72,17 @@ def main():
     eigensolver.solve(args.modes)
     rows = []
     for i in range(eigensolver.get_number_converged()):
-        value, _, _, _ = eigensolver.get_eigenpair(i)
-        if value <= 0:
+        value, imag, _, _ = eigensolver.get_eigenpair(i)
+        if abs(imag) > 1.0e-9 * max(abs(value), 1.0):
+            raise RuntimeError(f"Non-real eigenvalue returned for mode {i}: {value}+{imag}i")
+        if not np.isfinite(value) or value <= 0:
             continue
         rows.append({"mode": i + 1, "eigenvalue_rad2_s2": value,
                      "frequency_hz": value**0.5/(2*3.141592653589793),
                      "nx": nx, "ny": ny, "transverse_tangent_amplitude_m": args.transverse_amplitude,
                      "tangent": "nonlinear" if model.geometric_nonlinearity else "linear"})
+    if not rows:
+        raise RuntimeError("No finite positive structural modes converged")
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", newline="") as stream:
