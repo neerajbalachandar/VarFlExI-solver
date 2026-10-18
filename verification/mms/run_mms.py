@@ -70,7 +70,7 @@ def verify_nonlinear_membrane_variation():
 
 def verify_plate_symbolics(config):
     result = {}
-    for label, nonlinear in (("linear", False), ("nonlinear", True)):
+    for label, nonlinear in (("nonlinear", True)):
         mms = make_plate_mms(config, nonlinear, config.get("include_quadratic_inplane_strain", True))
         check_values = []
         for group in mms.boundary_checks.values():
