@@ -1,0 +1,8 @@
+study,case,factor_or_value,config_dir,dt_s,h_s_chord_m,h_s_span_m,h_vlm_span_m,h_particle_release_m,sigma_particle_initial_m,C_p,Fo_p,execution
+time,dt_quarter,4.0,/home/dysco/FLOWUnsteady/VarFLEXI-rVPM-Fenics/verification/resolution/runs/time/dt_quarter/config,0.00025,0.008,0.006,0.012,0.00375,0.0075,1.0,0.00026666666666666673,NOT_RUN
+time,dt_half,2.0,/home/dysco/FLOWUnsteady/VarFLEXI-rVPM-Fenics/verification/resolution/runs/time/dt_half/config,0.0005,0.008,0.006,0.012,0.00375,0.0075,2.0,0.0005333333333333335,NOT_RUN
+time,baseline,1.0,/home/dysco/FLOWUnsteady/VarFLEXI-rVPM-Fenics/verification/resolution/runs/time/baseline/config,0.001,0.008,0.006,0.012,0.00375,0.0075,4.0,0.001066666666666667,NOT_RUN
+time,dt2x,0.5,/home/dysco/FLOWUnsteady/VarFLEXI-rVPM-Fenics/verification/resolution/runs/time/dt2x/config,0.002,0.008,0.006,0.012,0.00375,0.0075,8.0,0.002133333333333334,NOT_RUN
+time,dt5x,0.2,/home/dysco/FLOWUnsteady/VarFLEXI-rVPM-Fenics/verification/resolution/runs/time/dt5x/config,0.005,0.008,0.006,0.012,0.00375,0.0075,20.0,0.005333333333333334,NOT_RUN
+time,dt10x,0.1,/home/dysco/FLOWUnsteady/VarFLEXI-rVPM-Fenics/verification/resolution/runs/time/dt10x/config,0.01,0.008,0.006,0.012,0.00375,0.0075,40.0,0.010666666666666668,NOT_RUN
+time,dt20x,0.05,/home/dysco/FLOWUnsteady/VarFLEXI-rVPM-Fenics/verification/resolution/runs/time/dt20x/config,0.02,0.008,0.006,0.012,0.00375,0.0075,80.0,0.021333333333333336,NOT_RUN

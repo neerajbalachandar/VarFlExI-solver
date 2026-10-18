@@ -4,7 +4,7 @@ set -euo pipefail
 
 #config folder
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_DIR="$ROOT_DIR/config"
+CONFIG_DIR="${VARFLEXI_CONFIG_DIR:-$ROOT_DIR/config}"
 
 
 

@@ -99,10 +99,14 @@ class StructuralSolver:
     def _setup_domain(self):
         self.n_span_comm = int(
             cfg_get(
-                self.fluid_config,
-                "mesh",
-                "n_span",
-                default=cfg_get(self.fluid_config, "n_span_comm", default=80),
+                self.coupling_config,
+                "comm_nspan",
+                default=cfg_get(
+                    self.fluid_config,
+                    "mesh",
+                    "n_span",
+                    default=cfg_get(self.fluid_config, "n_span_comm", default=80),
+                ),
             )
         )
         self.domain = SolidDomain(

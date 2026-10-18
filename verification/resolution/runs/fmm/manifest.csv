@@ -1,0 +1,4 @@
+study,case,factor_or_value,config_dir,dt_s,h_s_chord_m,h_s_span_m,h_vlm_span_m,h_particle_release_m,sigma_particle_initial_m,C_p,Fo_p,execution
+fmm,tol_1e-2,0.01,/home/dysco/FLOWUnsteady/VarFLEXI-rVPM-Fenics/verification/resolution/runs/fmm/tol_1e-2/config,0.001,0.008,0.006,0.012,0.00375,0.0075,4.0,0.001066666666666667,NOT_RUN
+fmm,tol_1e-3,0.001,/home/dysco/FLOWUnsteady/VarFLEXI-rVPM-Fenics/verification/resolution/runs/fmm/tol_1e-3/config,0.001,0.008,0.006,0.012,0.00375,0.0075,4.0,0.001066666666666667,NOT_RUN
+fmm,tol_1e-4,0.0001,/home/dysco/FLOWUnsteady/VarFLEXI-rVPM-Fenics/verification/resolution/runs/fmm/tol_1e-4/config,0.001,0.008,0.006,0.012,0.00375,0.0075,4.0,0.001066666666666667,NOT_RUN
