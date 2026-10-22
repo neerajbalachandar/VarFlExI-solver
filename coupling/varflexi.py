@@ -322,22 +322,21 @@ class VarFlExICoupler:
                     "force_residual",
                     "force_reference_norm",
                     "force_relative_error",
-                    "force_transfer_residual",
+                    "incremental_work_Wf",
+                    "incremental_work_Ws",
+                    "incremental_work_defect",
+                    "incremental_work_relative_error",
+                    "force_transfer_residual_norm",
                     "force_transfer_relative_error",
+                    "moment_transfer_residual_norm",
+                    "moment_transfer_relative_error",
                     "force_transfer_apply_time",
-                    "fluid_force_round_trip_residual",
-                    "fluid_force_round_trip_relative_error",
-                    "solid_displacement_round_trip_residual",
-                    "solid_displacement_round_trip_relative_error",
                     "geometry_transfer_apply_time",
                     "solid_solve_time",
                     "solid_io_time",
                     "crm_setup_time",
                     "rbf_setup_time",
                     "geometry_rbf_setup_time",
-                    "geometry_work_Wf",
-                    "geometry_work_Ws",
-                    "geometry_work_rel_error",
                     "geometry_residual",
                     "geometry_reference_norm",
                     "geometry_relative_error",
@@ -466,36 +465,31 @@ class VarFlExICoupler:
                         f"Solid force-transfer diagnostic step mismatch: "
                         f"got {force_transfer_step}, expected {step}"
                     )
-                force_transfer_residual = optional_float(
-                    force_transfer_data, "force_transfer_residual"
+                incremental_work_Wf = optional_float(force_transfer_data, "incremental_work_Wf")
+                incremental_work_Ws = optional_float(force_transfer_data, "incremental_work_Ws")
+                incremental_work_defect = optional_float(force_transfer_data, "incremental_work_defect")
+                incremental_work_relative_error = optional_float(
+                    force_transfer_data, "incremental_work_relative_error"
+                )
+                force_transfer_residual_norm = optional_float(
+                    force_transfer_data, "force_transfer_residual_norm"
                 )
                 force_transfer_relative_error = optional_float(
                     force_transfer_data, "force_transfer_relative_error"
                 )
+                moment_transfer_residual_norm = optional_float(
+                    force_transfer_data, "moment_transfer_residual_norm"
+                )
+                moment_transfer_relative_error = optional_float(
+                    force_transfer_data, "moment_transfer_relative_error"
+                )
                 force_transfer_apply_time = optional_float(force_transfer_data, "force_transfer_apply_time")
-                fluid_force_round_trip_residual = optional_float(
-                    force_transfer_data, "fluid_force_round_trip_residual"
-                )
-                fluid_force_round_trip_relative_error = optional_float(
-                    force_transfer_data, "fluid_force_round_trip_relative_error"
-                )
-                solid_displacement_round_trip_residual = optional_float(
-                    force_transfer_data, "solid_displacement_round_trip_residual"
-                )
-                solid_displacement_round_trip_relative_error = optional_float(
-                    force_transfer_data, "solid_displacement_round_trip_relative_error"
-                )
                 geometry_transfer_apply_time = optional_float(geo_data, "geometry_transfer_apply_time")
                 solid_solve_time = optional_float(geo_data, "solid_solve_time")
                 solid_io_time = optional_float(geo_data, "solid_io_time")
                 crm_setup_time = optional_float(force_transfer_data, "crm_setup_time")
                 rbf_setup_time = optional_float(force_transfer_data, "rbf_setup_time")
                 geometry_rbf_setup_time = optional_float(force_transfer_data, "geometry_rbf_setup_time")
-                geometry_work_Wf = optional_float(force_transfer_data, "geometry_work_Wf")
-                geometry_work_Ws = optional_float(force_transfer_data, "geometry_work_Ws")
-                geometry_work_rel_error = optional_float(
-                    force_transfer_data, "geometry_work_rel_error"
-                )
 
                 json.dump(
                     {
@@ -508,22 +502,21 @@ class VarFlExICoupler:
                         "force_residual": force_residual,
                         "force_reference_norm": force_reference_norm,
                         "force_relative_error": force_relative_error,
-                        "force_transfer_residual": force_transfer_residual,
+                        "incremental_work_Wf": incremental_work_Wf,
+                        "incremental_work_Ws": incremental_work_Ws,
+                        "incremental_work_defect": incremental_work_defect,
+                        "incremental_work_relative_error": incremental_work_relative_error,
+                        "force_transfer_residual_norm": force_transfer_residual_norm,
                         "force_transfer_relative_error": force_transfer_relative_error,
+                        "moment_transfer_residual_norm": moment_transfer_residual_norm,
+                        "moment_transfer_relative_error": moment_transfer_relative_error,
                         "force_transfer_apply_time": force_transfer_apply_time,
-                        "fluid_force_round_trip_residual": fluid_force_round_trip_residual,
-                        "fluid_force_round_trip_relative_error": fluid_force_round_trip_relative_error,
-                        "solid_displacement_round_trip_residual": solid_displacement_round_trip_residual,
-                        "solid_displacement_round_trip_relative_error": solid_displacement_round_trip_relative_error,
                         "geometry_transfer_apply_time": geometry_transfer_apply_time,
                         "solid_solve_time": solid_solve_time,
                         "solid_io_time": solid_io_time,
                         "crm_setup_time": crm_setup_time,
                         "rbf_setup_time": rbf_setup_time,
                         "geometry_rbf_setup_time": geometry_rbf_setup_time,
-                        "geometry_work_Wf": geometry_work_Wf,
-                        "geometry_work_Ws": geometry_work_Ws,
-                        "geometry_work_rel_error": geometry_work_rel_error,
                         "geometry_residual": geometry_residual,
                         "geometry_reference_norm": geometry_reference_norm,
                         "geometry_relative_error": geometry_relative_error,
@@ -555,22 +548,21 @@ class VarFlExICoupler:
                         f"{force_residual:.6e}",
                         f"{force_reference_norm:.6e}",
                         f"{force_relative_error:.6e}",
-                        f"{force_transfer_residual:.6e}" if force_transfer_residual == force_transfer_residual else "nan",
+                        f"{incremental_work_Wf:.6e}" if incremental_work_Wf == incremental_work_Wf else "nan",
+                        f"{incremental_work_Ws:.6e}" if incremental_work_Ws == incremental_work_Ws else "nan",
+                        f"{incremental_work_defect:.6e}" if incremental_work_defect == incremental_work_defect else "nan",
+                        f"{incremental_work_relative_error:.6e}" if incremental_work_relative_error == incremental_work_relative_error else "nan",
+                        f"{force_transfer_residual_norm:.6e}" if force_transfer_residual_norm == force_transfer_residual_norm else "nan",
                         f"{force_transfer_relative_error:.6e}" if force_transfer_relative_error == force_transfer_relative_error else "nan",
+                        f"{moment_transfer_residual_norm:.6e}" if moment_transfer_residual_norm == moment_transfer_residual_norm else "nan",
+                        f"{moment_transfer_relative_error:.6e}" if moment_transfer_relative_error == moment_transfer_relative_error else "nan",
                         f"{force_transfer_apply_time:.6e}" if force_transfer_apply_time == force_transfer_apply_time else "nan",
-                        f"{fluid_force_round_trip_residual:.6e}" if fluid_force_round_trip_residual == fluid_force_round_trip_residual else "nan",
-                        f"{fluid_force_round_trip_relative_error:.6e}" if fluid_force_round_trip_relative_error == fluid_force_round_trip_relative_error else "nan",
-                        f"{solid_displacement_round_trip_residual:.6e}" if solid_displacement_round_trip_residual == solid_displacement_round_trip_residual else "nan",
-                        f"{solid_displacement_round_trip_relative_error:.6e}" if solid_displacement_round_trip_relative_error == solid_displacement_round_trip_relative_error else "nan",
                         f"{geometry_transfer_apply_time:.6e}" if geometry_transfer_apply_time == geometry_transfer_apply_time else "nan",
                         f"{solid_solve_time:.6e}" if solid_solve_time == solid_solve_time else "nan",
                         f"{solid_io_time:.6e}" if solid_io_time == solid_io_time else "nan",
                         f"{crm_setup_time:.6e}" if crm_setup_time == crm_setup_time else "nan",
                         f"{rbf_setup_time:.6e}" if rbf_setup_time == rbf_setup_time else "nan",
                         f"{geometry_rbf_setup_time:.6e}" if geometry_rbf_setup_time == geometry_rbf_setup_time else "nan",
-                        f"{geometry_work_Wf:.6e}" if geometry_work_Wf == geometry_work_Wf else "nan",
-                        f"{geometry_work_Ws:.6e}" if geometry_work_Ws == geometry_work_Ws else "nan",
-                        f"{geometry_work_rel_error:.6e}" if geometry_work_rel_error == geometry_work_rel_error else "nan",
                         f"{geometry_residual:.6e}",
                         f"{geometry_reference_norm:.6e}",
                         f"{geometry_relative_error:.6e}",

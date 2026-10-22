@@ -93,37 +93,6 @@ class RBFTransfer:
         )
 
     @staticmethod
-    def relative_round_trip_error(reference, round_trip, epsilon_reg=1.0e-16):
-        reference = np.asarray(reference, dtype=float).reshape(-1, 3)
-        round_trip = np.asarray(round_trip, dtype=float).reshape(-1, 3)
-        residual = float(np.linalg.norm((round_trip - reference).reshape(-1)))
-        reference_norm = float(np.linalg.norm(reference.reshape(-1)))
-        relative_error = residual / max(reference_norm + float(epsilon_reg), 1.0e-300)
-        return residual, relative_error
-
-    def round_trip_force_metrics(self, fluid_forces, epsilon_reg=1.0e-16):
-        fluid_forces = np.asarray(fluid_forces, dtype=float).reshape(-1, 3)
-        solid_forces, _rhs = self.apply(fluid_forces)
-        fluid_forces_round_trip = self.apply_rbf_interpolation(
-            solid_forces, self.nbr_ids, self.nbr_w
-        ) * self.A_diag[:, None]
-        residual, relative_error = self.relative_round_trip_error(
-            fluid_forces, fluid_forces_round_trip, epsilon_reg=epsilon_reg
-        )
-        return residual, relative_error, fluid_forces_round_trip
-
-    def round_trip_displacement_metrics(self, solid_displacements, epsilon_reg=1.0e-16):
-        solid_displacements = np.asarray(solid_displacements, dtype=float).reshape(-1, 3)
-        fluid_displacements = self.apply_rbf_interpolation(
-            solid_displacements, self.nbr_ids, self.nbr_w
-        )
-        solid_displacements_round_trip, _rhs = self.apply(fluid_displacements)
-        residual, relative_error = self.relative_round_trip_error(
-            solid_displacements, solid_displacements_round_trip, epsilon_reg=epsilon_reg
-        )
-        return residual, relative_error, solid_displacements_round_trip
-
-    @staticmethod
     def apply_rbf_interpolation(values, nbr_ids, nbr_w):
         values = np.asarray(values, dtype=float).reshape(-1, 3)
         return np.sum(nbr_w[:, :, None] * values[nbr_ids, :], axis=1)

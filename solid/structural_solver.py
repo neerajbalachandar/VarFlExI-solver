@@ -294,6 +294,15 @@ class StructuralSolver:
         self.q_pvd = File(self.q_pvd_path)
         self.sig_pvd = File(self.sig_pvd_path)
         self.mesh_pvd << self.domain.mesh
+        self.geometry_consistency_path = os.path.join(
+            self.out_dir,
+            cfg_get(self.solid_config, "geometry_consistency_filename", default="cp_geometry_consistency.txt"),
+        )
+        self.geometry_consistency_fp = open(self.geometry_consistency_path, "w")
+        self.geometry_consistency_fp.write(
+            "# step time station x y z u_ref_x u_ref_y u_ref_z u_geom_x u_geom_y u_geom_z "
+            "err_x err_y err_z err_norm\\n"
+        )
 
     def _setup_socket(self):
         print("Connecting solid to coupling server...")
@@ -319,20 +328,21 @@ class StructuralSolver:
         self.step_walltime = np.full((self.Nsteps,), np.nan, dtype=float)
         self.E_damp_acc = 0.0
         self.forces_prev = None
-        self.work_rel_errors = np.full((self.Nsteps,), np.nan, dtype=float)
-        self.work_Wf = np.full((self.Nsteps,), np.nan, dtype=float)
-        self.work_Ws = np.full((self.Nsteps,), np.nan, dtype=float)
-        self.geometry_work_rel_errors = np.full((self.Nsteps,), np.nan, dtype=float)
-        self.geometry_work_Wf = np.full((self.Nsteps,), np.nan, dtype=float)
-        self.geometry_work_Ws = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.incremental_work_rel_errors = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.incremental_work_Wf = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.incremental_work_Ws = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.incremental_work_defects = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.force_transfer_relative_errors = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.moment_transfer_relative_errors = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.force_transfer_residual_norms = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.moment_transfer_residual_norms = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.cp_geometry_rms_errors = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.cp_geometry_max_errors = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.cp_geometry_relative_rms_errors = np.full((self.Nsteps,), np.nan, dtype=float)
         self.force_residuals = np.full((self.Nsteps,), np.nan, dtype=float)
         self.force_reference_norms = np.full((self.Nsteps,), np.nan, dtype=float)
         self.force_relative_errors = np.full((self.Nsteps,), np.nan, dtype=float)
-        self.force_transfer_residuals = np.full((self.Nsteps,), np.nan, dtype=float)
-        self.force_transfer_relative_errors = np.full((self.Nsteps,), np.nan, dtype=float)
         self.force_transfer_apply_times = np.full((self.Nsteps,), np.nan, dtype=float)
-        self.displacement_transfer_residuals = np.full((self.Nsteps,), np.nan, dtype=float)
-        self.displacement_transfer_relative_errors = np.full((self.Nsteps,), np.nan, dtype=float)
         self.geometry_transfer_apply_times = np.full((self.Nsteps,), np.nan, dtype=float)
         self.solid_solve_times = np.full((self.Nsteps,), np.nan, dtype=float)
         self.solid_io_times = np.full((self.Nsteps,), np.nan, dtype=float)
@@ -445,81 +455,15 @@ class StructuralSolver:
             self.forces_prev = forces_eff.copy()
 
             nodal_forces = None
-            Fs_coeff = None
             force_transfer_apply_start = perf_counter()
             if self.force_transfer_mode == "crm":
                 _, nodal_forces = self.transfer.apply_force_transfer(forces_eff)
             else:
-                Fs_coeff, nodal_forces = self.transfer.apply_force_transfer(forces_eff)
+                _, nodal_forces = self.transfer.apply_force_transfer(forces_eff)
             force_transfer_apply_time = perf_counter() - force_transfer_apply_start
             self.force_transfer_apply_times[i_step] = force_transfer_apply_time
             if not np.isfinite(nodal_forces).all():
                 raise RuntimeError(f"Non-finite mapped nodal forces at solid step {i_step + 1}")
-
-            (
-                force_transfer_residual,
-                force_transfer_relative_error,
-                _structural_force_common,
-            ) = self.transfer.force_transfer_metrics(
-                forces_eff,
-                nodal_forces,
-                Fs_coeff=Fs_coeff,
-                epsilon_reg=self.epsilon_reg,
-            )
-            self.force_transfer_residuals[i_step] = force_transfer_residual
-            self.force_transfer_relative_errors[i_step] = force_transfer_relative_error
-            interface_disp_prev = self.transfer.get_nodal_displacements_plate(
-                self.model.q_old,
-                self.interface_node_ids,
-                self.dofs_u_x,
-                self.dofs_u_y,
-                self.dofs_w,
-            )
-            (
-                displacement_transfer_residual,
-                displacement_transfer_relative_error,
-                _solid_displacement_round_trip,
-            ) = self.transfer.displacement_transfer_metrics(
-                interface_disp_prev, epsilon_reg=self.epsilon_reg
-            )
-            self.displacement_transfer_residuals[i_step] = displacement_transfer_residual
-            self.displacement_transfer_relative_errors[i_step] = displacement_transfer_relative_error
-            geometry_work_Wf = float("nan")
-            geometry_work_Ws = float("nan")
-            geometry_work_rel_error = float("nan")
-            if self.work_conservative_mode and nodal_forces is not None:
-                u_le_prev, u_te_prev, _u_common_prev, _u_geom_prev = self.transfer.apply_geometry_transfer(
-                    self.model.q_old,
-                    fallback_tree=self.interface_tree,
-                    fallback_vals=interface_disp_prev,
-                )
-                u_cp_geom_prev = (1.0 - self.eta_cp) * u_le_prev + self.eta_cp * u_te_prev
-                geometry_work_Wf = float(np.sum(u_cp_geom_prev * (forces_eff * self.A_diag[:, None])))
-                geometry_work_Ws = float(np.sum(interface_disp_prev * nodal_forces))
-                geometry_work_rel_error = abs(geometry_work_Wf - geometry_work_Ws) / max(
-                    abs(geometry_work_Wf), abs(geometry_work_Ws), 1.0e-16
-                )
-                self.geometry_work_rel_errors[i_step] = geometry_work_rel_error
-                self.geometry_work_Wf[i_step] = geometry_work_Wf
-                self.geometry_work_Ws[i_step] = geometry_work_Ws
-            force_transfer_msg = {
-                "type": "force_transfer_diagnostics",
-                "step": i_step + 1,
-                "force_transfer_residual": force_transfer_residual,
-                "force_transfer_relative_error": force_transfer_relative_error,
-                "force_transfer_apply_time": force_transfer_apply_time,
-                "fluid_force_round_trip_residual": force_transfer_residual,
-                "fluid_force_round_trip_relative_error": force_transfer_relative_error,
-                "solid_displacement_round_trip_residual": displacement_transfer_residual,
-                "solid_displacement_round_trip_relative_error": displacement_transfer_relative_error,
-                "crm_setup_time": self.transfer.crm_setup_time,
-                "rbf_setup_time": self.transfer.rbf_setup_time,
-                "geometry_rbf_setup_time": self.transfer.geometry_rbf_setup_time,
-                "geometry_work_Wf": geometry_work_Wf,
-                "geometry_work_Ws": geometry_work_Ws,
-                "geometry_work_rel_error": geometry_work_rel_error,
-            }
-            self.sock.sendall((json.dumps(force_transfer_msg) + "\n").encode())
 
             ext_force_vec = self.ext_force_vec_template.copy()
             ext_force_vec.zero()
@@ -537,6 +481,13 @@ class StructuralSolver:
             self._solve_newton_step(ext_force_vec)
             solid_solve_time = perf_counter() - solid_solve_start
             self.solid_solve_times[i_step] = solid_solve_time
+            interface_disp_cur = self.transfer.get_nodal_displacements_plate(
+                self.model.q,
+                self.interface_node_ids,
+                self.dofs_u_x,
+                self.dofs_u_y,
+                self.dofs_w,
+            )
 
             if self.work_conservative_mode and nodal_forces is not None:
                 interface_disp_prev = self.transfer.get_nodal_displacements_plate(
@@ -546,48 +497,60 @@ class StructuralSolver:
                     self.dofs_u_y,
                     self.dofs_w,
                 )
-                if self.force_transfer_mode == "crm":
-                    u_panel_prev = self.transfer.nodal_displacements_to_panel_average(
-                        interface_disp_prev,
-                        self.crm_transfer_matrix,
-                        self.crm_panel_areas,
-                    )
-                    Wf = float(np.sum(u_panel_prev * (forces_eff * self.A_diag[:, None])))
-                    Ws = float(np.sum(interface_disp_prev * nodal_forces))
-                else:
-                    u_cp_prev = self.transfer.sample_vector_field_at_targets(
-                        self.model.q_old,
-                        self.cp_targets,
-                        fallback_tree=self.interface_tree,
-                        fallback_vals=interface_disp_prev,
-                    )
-                    Wf = float(np.sum(u_cp_prev * (forces_eff * self.A_diag[:, None])))
-                    Ws = float(np.sum(interface_disp_prev * (Fs_coeff * self.S_lumped[:, None])))
-                rel_work_err = abs(Wf - Ws) / max(abs(Wf), abs(Ws), 1.0e-16)
-                self.work_rel_errors[i_step] = rel_work_err
-                self.work_Wf[i_step] = Wf
-                self.work_Ws[i_step] = Ws
-
-                u_le_prev, u_te_prev, _u_common_prev, _u_geom_prev = self.transfer.apply_geometry_transfer(
-                    self.model.q_old,
-                    fallback_tree=self.interface_tree,
-                    fallback_vals=interface_disp_prev,
+                Wf, Ws, work_defect, rel_work_err = self.transfer.incremental_work_metrics(
+                    interface_disp_cur - interface_disp_prev,
+                    forces_eff,
+                    nodal_forces,
+                    epsilon_reg=self.epsilon_reg,
                 )
-                u_cp_geom_prev = (1.0 - self.eta_cp) * u_le_prev + self.eta_cp * u_te_prev
-                Wf_geom = float(np.sum(u_cp_geom_prev * (forces_eff * self.A_diag[:, None])))
-                Ws_geom = float(np.sum(interface_disp_prev * nodal_forces))
-                rel_work_err_geom = abs(Wf_geom - Ws_geom) / max(
-                    abs(Wf_geom), abs(Ws_geom), 1.0e-16
+                self.incremental_work_Wf[i_step] = Wf
+                self.incremental_work_Ws[i_step] = Ws
+                self.incremental_work_defects[i_step] = work_defect
+                self.incremental_work_rel_errors[i_step] = rel_work_err
+                (
+                    _force_fluid,
+                    _force_solid,
+                    _moment_fluid,
+                    _moment_solid,
+                    force_residual,
+                    moment_residual,
+                    force_rel_error,
+                    moment_rel_error,
+                ) = self.transfer.wrench_transfer_metrics(
+                    self.cp_targets,
+                    forces_eff * self.A_diag[:, None],
+                    self.interface_coords,
+                    nodal_forces,
+                    epsilon_reg=self.epsilon_reg,
                 )
-                self.geometry_work_rel_errors[i_step] = rel_work_err_geom
-                self.geometry_work_Wf[i_step] = Wf_geom
-                self.geometry_work_Ws[i_step] = Ws_geom
+                self.force_transfer_residual_norms[i_step] = np.linalg.norm(force_residual)
+                self.moment_transfer_residual_norms[i_step] = np.linalg.norm(moment_residual)
+                self.force_transfer_relative_errors[i_step] = force_rel_error
+                self.moment_transfer_relative_errors[i_step] = moment_rel_error
                 if i_step == 0 or (i_step + 1) % 20 == 0:
                     print(
-                        f"Work audit step {i_step + 1}: "
-                        f"Wf={Wf:.6e}, Ws={Ws:.6e}, rel_err={rel_work_err:.3e}, "
-                        f"geom_rel_err={rel_work_err_geom:.3e}"
+                        f"Transfer audit step {i_step + 1}: "
+                        f"incremental-work rel_err={rel_work_err:.3e}, "
+                        f"force/moment rel_err={force_rel_error:.3e}/{moment_rel_error:.3e}"
                     )
+
+            force_transfer_msg = {
+                "type": "force_transfer_diagnostics",
+                "step": i_step + 1,
+                "force_transfer_apply_time": force_transfer_apply_time,
+                "incremental_work_Wf": self.incremental_work_Wf[i_step],
+                "incremental_work_Ws": self.incremental_work_Ws[i_step],
+                "incremental_work_defect": self.incremental_work_defects[i_step],
+                "incremental_work_relative_error": self.incremental_work_rel_errors[i_step],
+                "force_transfer_residual_norm": self.force_transfer_residual_norms[i_step],
+                "force_transfer_relative_error": self.force_transfer_relative_errors[i_step],
+                "moment_transfer_residual_norm": self.moment_transfer_residual_norms[i_step],
+                "moment_transfer_relative_error": self.moment_transfer_relative_errors[i_step],
+                "crm_setup_time": self.transfer.crm_setup_time,
+                "rbf_setup_time": self.transfer.rbf_setup_time,
+                "geometry_rbf_setup_time": self.transfer.geometry_rbf_setup_time,
+            }
+            self.sock.sendall((json.dumps(force_transfer_msg) + "\n").encode())
 
             self.model.update_fields()
             surface_strain_rms = self.model.compute_surface_strain_rms()
@@ -662,6 +625,31 @@ class StructuralSolver:
                                 f"TE pre-proj rel seg err max/mean = {np.max(rel_sp_te):.3e}/{np.mean(rel_sp_te):.3e}"
                             )
                 u_cp_arr = (1.0 - self.eta_cp) * u_le_arr + self.eta_cp * u_te_arr
+                u_cp_reference = self.transfer.sample_vector_field_at_targets(
+                    self.model.q,
+                    self.cp_targets,
+                    fallback_tree=self.interface_tree,
+                    fallback_vals=interface_disp_cur,
+                )
+                cp_geometry_error = u_cp_arr - u_cp_reference
+                cp_error_norm = np.linalg.norm(cp_geometry_error, axis=1)
+                cp_reference_rms = np.sqrt(np.mean(np.sum(u_cp_reference ** 2, axis=1)))
+                self.cp_geometry_rms_errors[i_step] = np.sqrt(np.mean(cp_error_norm ** 2))
+                self.cp_geometry_max_errors[i_step] = np.max(cp_error_norm)
+                self.cp_geometry_relative_rms_errors[i_step] = self.cp_geometry_rms_errors[i_step] / max(
+                    cp_reference_rms, self.epsilon_reg
+                )
+                for station, (coord, u_ref, u_geom, err, err_norm) in enumerate(
+                    zip(self.cp_targets, u_cp_reference, u_cp_arr, cp_geometry_error, cp_error_norm)
+                ):
+                    self.geometry_consistency_fp.write(
+                        f"{i_step + 1} {self.time[i_step + 1]:.12e} {station} "
+                        f"{coord[0]:.12e} {coord[1]:.12e} {coord[2]:.12e} "
+                        f"{u_ref[0]:.12e} {u_ref[1]:.12e} {u_ref[2]:.12e} "
+                        f"{u_geom[0]:.12e} {u_geom[1]:.12e} {u_geom[2]:.12e} "
+                        f"{err[0]:.12e} {err[1]:.12e} {err[2]:.12e} {err_norm:.12e}\n"
+                    )
+                self.geometry_consistency_fp.flush()
                 zero_rot = np.zeros_like(u_cp_arr)
                 (
                     geometry_residual,
@@ -723,11 +711,13 @@ class StructuralSolver:
         self._finalize()
 
     def _finalize(self):
+        self.geometry_consistency_fp.close()
         self.sock_file.close()
         self.sock.close()
         print("Solid solver finished.")
         print(f"Solid field outputs: {self.xdmf_path}")
         print(f"Solid VTK outputs: {self.q_pvd_path}, {self.sig_pvd_path}, {self.mesh_pvd_path}")
+        print(f"CP geometry consistency data: {self.geometry_consistency_path}")
 
         diag_csv = os.path.join(
             self.out_dir,
@@ -735,12 +725,13 @@ class StructuralSolver:
         )
         with open(diag_csv, "w") as fp:
             fp.write(
-                "step,time,u_tip,E_elas,E_kin,E_damp,E_tot,work_Wf,work_Ws,work_rel_error,"
-                "geometry_work_Wf,geometry_work_Ws,geometry_work_rel_error,"
+                "step,time,u_tip,E_elas,E_kin,E_damp,E_tot,incremental_work_Wf,incremental_work_Ws,"
+                "incremental_work_defect,incremental_work_relative_error,"
+                "force_transfer_residual_norm,force_transfer_relative_error,"
+                "moment_transfer_residual_norm,moment_transfer_relative_error,"
+                "cp_geometry_rms_error,cp_geometry_max_error,cp_geometry_relative_rms_error,"
                 "force_residual,force_reference_norm,force_relative_error,"
-                "force_transfer_residual,force_transfer_relative_error,force_transfer_apply_time,"
-                "fluid_force_round_trip_residual,fluid_force_round_trip_relative_error,"
-                "solid_displacement_round_trip_residual,solid_displacement_round_trip_relative_error,"
+                "force_transfer_apply_time,"
                 "geometry_residual,geometry_reference_norm,geometry_relative_error,geometry_transfer_apply_time,"
                 "surface_strain_percent,strain_increase_percentage_points,"
                 "solid_solve_time,solid_io_time,step_walltime\n"
@@ -754,22 +745,21 @@ class StructuralSolver:
                     f"{self.energies[k_idx + 1, 1]:.12e},"
                     f"{self.energies[k_idx + 1, 2]:.12e},"
                     f"{self.energies[k_idx + 1, 3]:.12e},"
-                    f"{self.work_Wf[k_idx]:.12e},"
-                    f"{self.work_Ws[k_idx]:.12e},"
-                    f"{self.work_rel_errors[k_idx]:.12e},"
-                    f"{self.geometry_work_Wf[k_idx]:.12e},"
-                    f"{self.geometry_work_Ws[k_idx]:.12e},"
-                    f"{self.geometry_work_rel_errors[k_idx]:.12e},"
+                    f"{self.incremental_work_Wf[k_idx]:.12e},"
+                    f"{self.incremental_work_Ws[k_idx]:.12e},"
+                    f"{self.incremental_work_defects[k_idx]:.12e},"
+                    f"{self.incremental_work_rel_errors[k_idx]:.12e},"
+                    f"{self.force_transfer_residual_norms[k_idx]:.12e},"
+                    f"{self.force_transfer_relative_errors[k_idx]:.12e},"
+                    f"{self.moment_transfer_residual_norms[k_idx]:.12e},"
+                    f"{self.moment_transfer_relative_errors[k_idx]:.12e},"
+                    f"{self.cp_geometry_rms_errors[k_idx]:.12e},"
+                    f"{self.cp_geometry_max_errors[k_idx]:.12e},"
+                    f"{self.cp_geometry_relative_rms_errors[k_idx]:.12e},"
                     f"{self.force_residuals[k_idx]:.12e},"
                     f"{self.force_reference_norms[k_idx]:.12e},"
                     f"{self.force_relative_errors[k_idx]:.12e},"
-                    f"{self.force_transfer_residuals[k_idx]:.12e},"
-                    f"{self.force_transfer_relative_errors[k_idx]:.12e},"
                     f"{self.force_transfer_apply_times[k_idx]:.12e},"
-                    f"{self.force_transfer_residuals[k_idx]:.12e},"
-                    f"{self.force_transfer_relative_errors[k_idx]:.12e},"
-                    f"{self.displacement_transfer_residuals[k_idx]:.12e},"
-                    f"{self.displacement_transfer_relative_errors[k_idx]:.12e},"
                     f"{self.geometry_residuals[k_idx]:.12e},"
                     f"{self.geometry_reference_norms[k_idx]:.12e},"
                     f"{self.geometry_relative_errors[k_idx]:.12e},"

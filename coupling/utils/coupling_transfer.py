@@ -350,46 +350,63 @@ class CouplingTransfer:
         u_te = u_aero_geometry[n_span:, :]
         return u_le, u_te, u_common, u_aero_geometry
 
-    # Diagnostic only: this probes the existing force-transfer path without
-    # redefining it as the transpose of the geometry-transfer operator.
-    def force_transfer_to_aero_space(self, nodal_forces, Fs_coeff=None):
-        if self.force_transfer_mode == "crm":
-            return self.nodal_displacements_to_panel_average(
-                nodal_forces, self.crm_transfer_matrix, self.crm_panel_areas
-            )
+    def cp_displacements_for_force_work(self, nodal_displacements):
+        """Return the displacement representation dual to the load transfer.
 
-        if Fs_coeff is None:
-            raise RuntimeError("RBF force-transfer diagnostic requires Fs_coeff")
-        Fs_coeff = np.asarray(Fs_coeff, dtype=float).reshape(-1, 3)
-        structural_at_aero = np.sum(
-            self.nbr_w[:, :, None] * Fs_coeff[self.nbr_ids, :], axis=1
-        )
-        return structural_at_aero * self.A_diag[:, None]
-
-    def force_transfer_metrics(self, aero_forces, nodal_forces, Fs_coeff=None, epsilon_reg=1.0e-16):
-        aero_forces = np.asarray(aero_forces, dtype=float).reshape(-1, 3)
-        structural_common = self.force_transfer_to_aero_space(nodal_forces, Fs_coeff=Fs_coeff)
-        if structural_common.shape != aero_forces.shape:
-            raise RuntimeError(
-                "Force-transfer diagnostic shape mismatch: "
-                f"structural_common={structural_common.shape}, aero_forces={aero_forces.shape}"
-            )
-        residual = float(np.linalg.norm((structural_common - aero_forces).reshape(-1)))
-        reference_norm = float(np.linalg.norm(aero_forces.reshape(-1)))
-        relative_error = residual / max(reference_norm + float(epsilon_reg), 1.0e-300)
-        return residual, relative_error, structural_common
-
-    def displacement_transfer_metrics(self, nodal_displacements, epsilon_reg=1.0e-16):
+        This is deliberately not the aerodynamic geometry reconstruction.  It
+        is the CP displacement operator whose transpose defines the nodal load
+        vector, so that it is the only appropriate displacement for a virtual
+        work audit of the load transfer.
+        """
         nodal_displacements = np.asarray(nodal_displacements, dtype=float).reshape(-1, 3)
         if self.force_transfer_mode == "crm":
-            return self.crm_backend.round_trip_displacement_metrics(
-                nodal_displacements,
-                self.crm_transfer_matrix,
-                self.crm_panel_areas,
-                epsilon_reg=epsilon_reg,
+            return self.nodal_displacements_to_panel_average(
+                nodal_displacements, self.crm_transfer_matrix, self.crm_panel_areas
             )
-        return self.rbf_backend.round_trip_displacement_metrics(
-            nodal_displacements, epsilon_reg=epsilon_reg
+        return self.apply_rbf_interpolation(nodal_displacements, self.nbr_ids, self.nbr_w)
+
+    def incremental_work_metrics(
+        self, delta_nodal_displacements, aero_forces, nodal_forces, epsilon_reg=1.0e-16
+    ):
+        """Audit virtual work using the CP/nodal operator pair actually used for loads."""
+        delta_nodal_displacements = np.asarray(delta_nodal_displacements, dtype=float).reshape(-1, 3)
+        aero_forces = np.asarray(aero_forces, dtype=float).reshape(-1, 3)
+        nodal_forces = np.asarray(nodal_forces, dtype=float).reshape(-1, 3)
+        delta_cp = self.cp_displacements_for_force_work(delta_nodal_displacements)
+        Wf = float(np.sum(delta_cp * (aero_forces * self.A_diag[:, None])))
+        Ws = float(np.sum(delta_nodal_displacements * nodal_forces))
+        defect = Wf - Ws
+        relative_error = abs(defect) / max(abs(Wf), abs(Ws), float(epsilon_reg))
+        return Wf, Ws, defect, relative_error
+
+    @staticmethod
+    def wrench_transfer_metrics(aero_coords, aero_forces, solid_coords, nodal_forces, epsilon_reg=1.0e-16):
+        """Return net-force and net-moment transfer residuals about the origin."""
+        aero_coords = np.asarray(aero_coords, dtype=float).reshape(-1, 3)
+        aero_forces = np.asarray(aero_forces, dtype=float).reshape(-1, 3)
+        solid_coords = np.asarray(solid_coords, dtype=float).reshape(-1, 3)
+        nodal_forces = np.asarray(nodal_forces, dtype=float).reshape(-1, 3)
+        force_fluid = np.sum(aero_forces, axis=0)
+        force_solid = np.sum(nodal_forces, axis=0)
+        moment_fluid = np.sum(np.cross(aero_coords, aero_forces), axis=0)
+        moment_solid = np.sum(np.cross(solid_coords, nodal_forces), axis=0)
+        force_residual = force_solid - force_fluid
+        moment_residual = moment_solid - moment_fluid
+        force_relative_error = float(np.linalg.norm(force_residual)) / max(
+            float(np.linalg.norm(force_fluid)), float(epsilon_reg)
+        )
+        moment_relative_error = float(np.linalg.norm(moment_residual)) / max(
+            float(np.linalg.norm(moment_fluid)), float(epsilon_reg)
+        )
+        return (
+            force_fluid,
+            force_solid,
+            moment_fluid,
+            moment_solid,
+            force_residual,
+            moment_residual,
+            force_relative_error,
+            moment_relative_error,
         )
 
     def span_edges_from_stations(self, eta_span_vals):
