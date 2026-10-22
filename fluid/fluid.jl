@@ -18,6 +18,8 @@ include("src/cli.jl")
 
 include("src/vlm_patch.jl")
 include("src/math_utils.jl")
+include("src/freestream.jl")
+include("src/vpm_config.jl")
 include("src/force_utils.jl")
 include("src/interpolation.jl")
 include("src/eta_mapping.jl")

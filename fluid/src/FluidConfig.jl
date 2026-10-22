@@ -140,6 +140,7 @@ function load_configs(fluid_path::AbstractString, solid_path::AbstractString, co
         as_bool(fluid, "shed_boundarylayer", false),
         as_float(fluid, "boundarylayer_prescribed_cd", 0.1),
         as_float(fluid, "boundarylayer_dipole_width", 0.0),
+        as_string(fluid, "vpm_sfs", "none"),
     )
 
     solver_cfg.shed_boundarylayer && solver_cfg.boundarylayer_dipole_width <= 0.0 &&

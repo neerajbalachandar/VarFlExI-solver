@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT / "solid"))
 from plate import make_plate_mms
 
 try:
-    from dolfin import Constant, assemble
+    from dolfin import Constant, FunctionAssigner, assemble
 except ImportError as exc:
     raise SystemExit(f"Plate Jacobian check requires legacy dolfin: {exc}") from exc
 

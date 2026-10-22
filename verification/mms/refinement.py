@@ -36,10 +36,12 @@ def cases(study):
     # Spatial: five simultaneous uniform refinements with dt held small enough
     # that the second-order time error is intended to sit below spatial error.
     # Temporal: six halvings of dt at fixed mesh and fixed physical final time.
+    # For the nonlinear formulation, dt=0.01 did not converge even with
+    # residual backtracking; dt=0.005 was verified to converge on this mesh.
     if study == "spatial":
         return [{"nx": n, "ny": 4*n//3, "dt": 0.0000625, "duration": 0.01}
                 for n in (6, 12, 24, 48, 96)]
-    return [{"nx": 48, "ny": 128, "dt": 0.01 / (2**level), "duration": 0.05}
+    return [{"nx": 48, "ny": 128, "dt": 0.005 / (2**level), "duration": 0.05}
             for level in range(6)]
 
 
@@ -86,7 +88,7 @@ def main():
         "error_for_order": "pairwise orders are written for all *_relative_l2 fields",
         "spatial_note": "hx and hy refine together; report both, and use max(hx,hy) only for a scalar rate axis",
         "mesh_aspect_ratio_note": "hx/hy is recorded per run; both nx and ny refine together",
-        "temporal_note": "six dt levels; fixed 48x128 mesh and 0.05 s final time",
+        "temporal_note": "six dt levels starting at 0.005 s; fixed 48x128 mesh and 0.05 s final time",
     }, indent=2))
     if not args.execute:
         print(f"Wrote plan {plan_path}; no simulations run. Add --execute in fenics-env.")

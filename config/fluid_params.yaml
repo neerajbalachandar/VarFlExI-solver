@@ -70,6 +70,7 @@ default_rho_over_sigma: 1.0
 minimum_ncrit: 3
 
 viscous_scheme: CoreSpreading
+vpm_sfs: none
 
 save_directory: results/rect_linear_regime/fluid/
 create_directory: true

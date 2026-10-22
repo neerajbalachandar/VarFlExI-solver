@@ -60,6 +60,7 @@ struct SolverConfig
     shed_boundarylayer::Bool
     boundarylayer_prescribed_cd::Float64
     boundarylayer_dipole_width::Float64
+    vpm_sfs::String
 
 end
 

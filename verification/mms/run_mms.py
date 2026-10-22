@@ -73,7 +73,14 @@ def verify_nonlinear_membrane_variation():
 def verify_plate_symbolics(config, heartbeat_s=10.0):
     result = {}
     for label, nonlinear in (("linear", False), ("nonlinear", True)):
-        mms = make_plate_mms(config, nonlinear, config.get("include_quadratic_inplane_strain", True))
+        mms = make_plate_mms(
+            config,
+            nonlinear,
+            config.get("include_quadratic_inplane_strain", True),
+            operation_factory=lambda stage, **kw: operation(
+                stage, heartbeat_s, detail=f"formulation={label}"
+            ),
+        )
         check_values = []
         for group in mms.boundary_checks.values():
             values = group if isinstance(group, list) else [group]

@@ -134,6 +134,7 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=1
     newton_atol = float(cfg.get("newton_atol", 1.0e-8))
     newton_rtol = float(cfg.get("newton_rtol", 1.0e-6))
     newton_maxit = int(cfg.get("newton_maxiter", cfg.get("newton_maxit", 20)))
+    newton_max_backtracks = int(cfg.get("newton_max_backtracks", 12))
 
     model.q_old.assign(make_mixed_function(model, exact_fields, 0, spaces, assigner))
     model.q.assign(model.q_old)
@@ -205,8 +206,37 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=1
             with operation("linear_solve_mumps", heartbeat_s,
                            detail=f"formulation={formulation} step={step}/{nsteps} Newton={iteration+1}"):
                 solve(A, model.dq_newton.vector(), rhs, "mumps")
-            model.q.vector().axpy(1.0, model.dq_newton.vector())
-            model.q.vector().apply("insert")
+            q_before = model.q.vector().get_local().copy()
+            delta_q = model.dq_newton.vector().get_local()
+            accepted = False
+            for backtrack in range(newton_max_backtracks + 1):
+                step_fraction = 0.5 ** backtrack
+                with operation("evaluate_Newton_backtracking_trial", heartbeat_s,
+                               detail=f"formulation={formulation} step={step}/{nsteps} "
+                                      f"Newton={iteration+1} fraction={step_fraction:.6g}"):
+                    model.q.vector().set_local(q_before + step_fraction * delta_q)
+                    model.q.vector().apply("insert")
+                    trial_rhs = assemble(model.residual)
+                    trial_rhs *= -1.0
+                    trial_rhs.axpy(1.0, force_vector)
+                    for bc in model.bcs:
+                        bc.apply(trial_rhs)
+                    trial_norm = trial_rhs.norm("l2")
+                if np.isfinite(trial_norm) and trial_norm < norm:
+                    accepted = True
+                    log(f"NEWTON STEP | formulation={formulation} step={step}/{nsteps} "
+                        f"iteration={iteration+1} fraction={step_fraction:.6g} "
+                        f"residual_before={norm:.8e} residual_after={trial_norm:.8e} "
+                        f"backtracks={backtrack}")
+                    break
+            if not accepted:
+                model.q.vector().set_local(q_before)
+                model.q.vector().apply("insert")
+                raise RuntimeError(
+                    f"Newton line search failed at step {step}, iteration {iteration+1}: "
+                    f"residual={norm:.4e}; no residual-reducing update in "
+                    f"{newton_max_backtracks + 1} trials"
+                )
         if not converged:
             raise RuntimeError(
                 f"MMS Newton solve failed at step {step}: residual={norm:.4e}, "
@@ -252,7 +282,7 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=1
            "initial_acceleration_projection_w_l2_m_s2": initial_acceleration_projection_errors[1],
            "initial_acceleration_projection_theta_l2_s2": initial_acceleration_projection_errors[2],
            "newton_atol": newton_atol, "newton_rtol": newton_rtol,
-           "newton_maxit": newton_maxit,
+           "newton_maxit": newton_maxit, "newton_max_backtracks": newton_max_backtracks,
            "newton_iterations_last_step": iteration + 1, "newton_residual_last_step": norm}
     for name, error, ref in zip(names, errors, refs):
         row[name] = error

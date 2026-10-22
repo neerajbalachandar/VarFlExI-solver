@@ -45,26 +45,14 @@ span_sampling_mode = coupling_cfg.span_sampling
 solid_ny_for_sampling = coupling_cfg.solid_ny
 custom_span_stride = coupling_cfg.custom_stride
 
-length(solver_cfg.freestream_gradient) == 9 || error("freestream_gradient must have 9 row-major values")
-length(solver_cfg.freestream_oscillation) == 3 || error("freestream_oscillation must have 3 components")
-length(solver_cfg.freestream_wavenumber) == 3 || error("freestream_wavenumber must have 3 components")
-length(solver_cfg.freestream_reference) == 3 || error("freestream_reference must have 3 components")
-freestream_base = magVinf * [cosd(AOA), 0.0, sind(AOA)]
-freestream_gradient = permutedims(reshape(solver_cfg.freestream_gradient, 3, 3))
+Vinf = configured_freestream(
+    magVinf, AOA, solver_cfg.freestream_gradient, solver_cfg.freestream_oscillation,
+    solver_cfg.freestream_wavenumber, solver_cfg.freestream_frequency,
+    solver_cfg.freestream_phase, solver_cfg.freestream_reference,
+)
+freestream_gradient = solver_cfg.freestream_gradient
 freestream_amplitude = solver_cfg.freestream_oscillation
-freestream_wavenumber = solver_cfg.freestream_wavenumber
-freestream_reference = solver_cfg.freestream_reference
-freestream_frequency = solver_cfg.freestream_frequency
-freestream_phase = solver_cfg.freestream_phase
 polar_label = isempty(solver_cfg.section_polar) ? "disabled" : solver_cfg.section_polar
-function Vinf(X, t)
-    x, y, z = X .- freestream_reference
-    kx, ky, kz = freestream_wavenumber
-    # Cyclic transverse modes keep this synthetic gust divergence-free.
-    phase = 2pi * freestream_frequency * t + freestream_phase
-    gust = freestream_amplitude .* sin.(phase .+ [ky * y, kz * z, kx * x])
-    return freestream_base + freestream_gradient * (X .- freestream_reference) + gust
-end
 
 if any(x -> !iszero(x), freestream_gradient)
     @warn "Spatial freestream gradient is active for VLM force evaluation; this FLOWVPM version advects wake particles using Uinf(t) sampled at the global origin, so wake convection does not resolve spatial gradients."
@@ -80,7 +68,7 @@ end
 println(
     "Fluid config: AoA=$(AOA) deg, U=$(magVinf) m/s, rho=$(rho), nu=$(nu), span=$(span), " *
     "n_span=$(n_span), nsteps=$(nsteps), dt=$(dt), p_per_step=$(p_per_step), " *
-    "polar=$(polar_label), " *
+    "polar=$(polar_label), vpm_sfs=$(solver_cfg.vpm_sfs), " *
     "shed_boundarylayer=$(solver_cfg.shed_boundarylayer)"
 )
 
@@ -170,6 +158,7 @@ vpm_fmm_settings = vpm.FMM(
 vpm_viscous = wake_cfg.viscous_scheme == "CoreSpreading" ?
               vpm.CoreSpreading(nu, sigma_vpm_overwrite, 1.0) :
               nothing
+vpm_sfs = configured_vpm_sfs(solver_cfg.vpm_sfs)
 
 println(
     "Shedding config: spanwise-only wing, n_span=$(n_span), " *
