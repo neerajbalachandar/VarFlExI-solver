@@ -90,13 +90,17 @@ def state_l2_error_and_reference(q_function, exact_expressions, time, measure, h
     return errors, references
 
 
-def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=10.0):
+def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=10.0,
+             production_formulation=False):
     wall_start = perf_counter()
-    formulation = "nonlinear" if nonlinear else "linear"
-    log(f"CASE START | formulation={formulation} nx={nx} ny={ny} dt={dt} duration={duration} "
-        f"config={Path(config_dir).resolve()} output={out_csv}")
     with open(Path(config_dir) / "solid_params.yaml") as stream:
         cfg = yaml.safe_load(stream)
+    if production_formulation:
+        nonlinear = bool(cfg.get("geometric_nonlinearity", True))
+    formulation = "production" if production_formulation else ("nonlinear" if nonlinear else "linear")
+    log(f"CASE START | formulation={formulation} geometric_nonlinearity={nonlinear} "
+        f"nx={nx} ny={ny} dt={dt} duration={duration} "
+        f"config={Path(config_dir).resolve()} output={out_csv}")
     with operation("symbolic_manufactured_solution", heartbeat_s, detail=f"formulation={formulation}"):
         mms = make_plate_mms(cfg, nonlinear, cfg.get("include_quadratic_inplane_strain", True),
                              operation_factory=lambda stage, **kw: operation(
@@ -135,6 +139,7 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=1
     newton_rtol = float(cfg.get("newton_rtol", 1.0e-6))
     newton_maxit = int(cfg.get("newton_maxiter", cfg.get("newton_maxit", 20)))
     newton_max_backtracks = int(cfg.get("newton_max_backtracks", 12))
+    force_ramp_iters = int(cfg.get("force_ramp_iters", 1))
 
     model.q_old.assign(make_mixed_function(model, exact_fields, 0, spaces, assigner))
     model.q.assign(model.q_old)
@@ -193,7 +198,8 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=1
                            detail=f"formulation={formulation} step={step}/{nsteps} Newton={iteration+1}"):
                 rhs = assemble(model.residual)
             rhs *= -1.0
-            rhs.axpy(1.0, force_vector)
+            ramp = min(1.0, float(iteration + 1) / force_ramp_iters) if force_ramp_iters > 0 else 1.0
+            rhs.axpy(ramp, force_vector)
             for bc in model.bcs:
                 bc.apply(A, rhs)
             norm = rhs.norm("l2")
@@ -218,7 +224,7 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=1
                     model.q.vector().apply("insert")
                     trial_rhs = assemble(model.residual)
                     trial_rhs *= -1.0
-                    trial_rhs.axpy(1.0, force_vector)
+                    trial_rhs.axpy(ramp, force_vector)
                     for bc in model.bcs:
                         bc.apply(trial_rhs)
                     trial_norm = trial_rhs.norm("l2")
@@ -262,7 +268,16 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=1
         errors.append(float(np.sqrt(assemble(inner(numerical-reference, numerical-reference) * dx))))
         refs.append(float(np.sqrt(assemble(inner(reference, reference) * dx))))
     names = ("inplane_u_l2", "transverse_w_l2", "rotation_theta_l2")
-    row = {"formulation": "nonlinear" if nonlinear else "linear", "nx": nx, "ny": ny,
+    row = {"formulation": formulation, "geometric_nonlinearity": bool(nonlinear),
+           "include_quadratic_inplane_strain": bool(cfg.get("include_quadratic_inplane_strain", True)),
+           "alpha_m": float(cfg.get("alpha_m", 0.10)), "alpha_f": float(cfg.get("alpha_f", 0.20)),
+           "eta_m": float(cfg["eta_m"]), "eta_k": float(cfg["eta_k"]),
+           "force_ramp_iters": force_ramp_iters, "newton_atol": newton_atol,
+           "newton_rtol": newton_rtol, "newton_maxiter": newton_maxit,
+           "external_load": "independent symbolic strong-form manufactured load",
+           "initial_state": "exact manufactured displacement, velocity, and acceleration at t=0",
+           "production_model": "solid.utils.reisner_mindlin_model.ReissnerMindlinModel",
+           "nx": nx, "ny": ny,
            "dt_s": dt, "duration_s": final_time, "steps": nsteps,
            "run_status": "completed",
            "command": shlex.join([sys.executable, *sys.argv]),
@@ -396,14 +411,22 @@ def main():
     parser.add_argument("--ny", type=int, default=32)
     parser.add_argument("--dt", type=float, default=0.0025)
     parser.add_argument("--duration", type=float, default=0.05)
-    parser.add_argument("--nonlinear", action="store_true")
+    formulation_group = parser.add_mutually_exclusive_group()
+    formulation_group.add_argument("--nonlinear", dest="formulation", action="store_const",
+                                   const="nonlinear", help="Use nonlinear comparison formulation.")
+    formulation_group.add_argument("--linear", dest="formulation", action="store_const",
+                                   const="linear", help="Use linear comparison formulation.")
+    formulation_group.add_argument("--production-formulation", dest="formulation", action="store_const",
+                                   const="production", help="Follow solid_params.yaml (the default).")
+    parser.set_defaults(formulation="production")
     parser.add_argument("--output", default=str(Path(__file__).parent / "results" / "plate_fenics.csv"))
     parser.add_argument("--heartbeat-seconds", type=float, default=10.0)
     args = parser.parse_args()
     parameters["form_compiler"]["optimize"] = True
     try:
-        run_case(args.config_dir, args.nx, args.ny, args.dt, args.duration, args.nonlinear,
-                 args.output, args.heartbeat_seconds)
+        run_case(args.config_dir, args.nx, args.ny, args.dt, args.duration,
+                 args.formulation == "nonlinear", args.output, args.heartbeat_seconds,
+                 args.formulation == "production")
     except BaseException:
         import traceback
         log(f"CASE FAILED | elapsed={perf_counter()-started:.3f}s\n{traceback.format_exc()}")

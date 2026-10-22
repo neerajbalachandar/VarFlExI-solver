@@ -59,7 +59,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--study", choices=("spatial", "temporal"), required=True)
     parser.add_argument("--execute", action="store_true", help="Run cases using the active Python/FEniCS environment.")
-    parser.add_argument("--formulation", choices=("linear", "nonlinear", "both"), default="both")
+    parser.add_argument(
+        "--formulation", choices=("production", "linear", "nonlinear", "both"),
+        default="production",
+        help="production follows geometric_nonlinearity in solid_params.yaml; both is a comparison study",
+    )
     parser.add_argument("--config-dir", default=str(ROOT / "config"))
     parser.add_argument("--heartbeat-seconds", type=float, default=10.0)
     parser.add_argument("--case-timeout-seconds", type=float, default=0.0,
@@ -85,6 +89,16 @@ def main():
         "span_m": span,
         "solid_config_path": str(config_path.resolve()),
         "solid_config_sha256": config_hash,
+        "production_formulation_from_config": {
+            "geometric_nonlinearity": bool(solid_cfg.get("geometric_nonlinearity", True)),
+            "include_quadratic_inplane_strain": bool(solid_cfg.get("include_quadratic_inplane_strain", True)),
+            "alpha_m": float(solid_cfg.get("alpha_m", 0.10)),
+            "alpha_f": float(solid_cfg.get("alpha_f", 0.20)),
+            "eta_m": float(solid_cfg["eta_m"]),
+            "eta_k": float(solid_cfg["eta_k"]),
+        },
+        "shared_production_model": "solid.utils.reisner_mindlin_model.ReissnerMindlinModel",
+        "manufactured_load_note": "Independent symbolic strong-form load; this is plate MMS, not coupled-FSI forcing.",
         "error_for_order": "pairwise orders are written for all *_relative_l2 fields",
         "spatial_note": "hx and hy refine together; report both, and use max(hx,hy) only for a scalar rate axis",
         "mesh_aspect_ratio_note": "hx/hy is recorded per run; both nx and ny refine together",
@@ -102,6 +116,16 @@ def main():
         "python_executable": sys.executable,
         "solid_config_path": str(config_path.resolve()),
         "solid_config_sha256": config_hash,
+        "production_formulation_from_config": {
+            "geometric_nonlinearity": bool(solid_cfg.get("geometric_nonlinearity", True)),
+            "include_quadratic_inplane_strain": bool(solid_cfg.get("include_quadratic_inplane_strain", True)),
+            "alpha_m": float(solid_cfg.get("alpha_m", 0.10)),
+            "alpha_f": float(solid_cfg.get("alpha_f", 0.20)),
+            "eta_m": float(solid_cfg["eta_m"]),
+            "eta_k": float(solid_cfg["eta_k"]),
+        },
+        "shared_production_model": "solid.utils.reisner_mindlin_model.ReissnerMindlinModel",
+        "manufactured_load_note": "Independent symbolic strong-form load; this is plate MMS, not coupled-FSI forcing.",
         "cases": [],
     }
     case_index = 0
@@ -116,6 +140,10 @@ def main():
                        "--heartbeat-seconds", str(args.heartbeat_seconds)]
             if formulation == "nonlinear":
                 command.append("--nonlinear")
+            elif formulation == "linear":
+                command.append("--linear")
+            elif formulation == "production":
+                command.append("--production-formulation")
             record = {"formulation": formulation, **case, "command": command,
                       "status": "running", "return_code": None}
             manifest["cases"].append(record)

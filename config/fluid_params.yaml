@@ -43,8 +43,10 @@ z: 1.0
 lambda_vpm: 2.0
 remove_every: 100
 sphere_factor: 200.0
-min_factor: 0.001
-max_factor: 50.0
+# Disable strength and core-size pruning while diagnosing wake truncation.
+# The solver's distant spherical cleanup remains enabled (at sphere_factor).
+min_factor: 0.0
+max_factor: 1.0e12
 
 wake_coupled: true
 start_with_wake: true
