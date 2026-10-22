@@ -16,6 +16,7 @@ import math
 import os
 import sys
 from pathlib import Path
+from time import perf_counter
 
 import matplotlib
 matplotlib.use("Agg")
@@ -27,6 +28,7 @@ import yaml
 from fluid import taylor_green_source
 from plate import make_plate_mms
 from scalar_generalized_alpha import run_scalar_test
+from progress import log, operation
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = Path(__file__).resolve().parent / "results"
@@ -68,10 +70,15 @@ def verify_nonlinear_membrane_variation():
     return {"status": "PASS", "directional_derivative_max_abs": 0.0}
 
 
-def verify_plate_symbolics(config):
+def verify_plate_symbolics(config, heartbeat_s=10.0):
     result = {}
     for label, nonlinear in (("linear", False), ("nonlinear", True)):
-        mms = make_plate_mms(config, nonlinear, config.get("include_quadratic_inplane_strain", True))
+        mms = make_plate_mms(
+            config, nonlinear, config.get("include_quadratic_inplane_strain", True),
+            operation_factory=lambda stage, **kw: operation(
+                stage, heartbeat_s, detail=f"formulation={label}"
+            ),
+        )
         check_values = []
         for group in mms.boundary_checks.values():
             values = group if isinstance(group, list) else [group]
@@ -108,7 +115,7 @@ def verify_plate_symbolics(config):
     return result
 
 
-def verify_rbf_component():
+def verify_rbf_component(heartbeat_s=10.0):
     module_path = ROOT / "coupling" / "utils" / "rbf_transfer.py"
     spec = importlib.util.spec_from_file_location("verification_rbf_transfer", module_path)
     module = importlib.util.module_from_spec(spec)
@@ -120,7 +127,9 @@ def verify_rbf_component():
     y_f = np.linspace(0.025, 0.975, nf)
     solid = np.column_stack((np.zeros(ns), y_s))
     fluid = np.column_stack((np.zeros(nf), y_f))
-    nbr, weights = RBFTransfer.build_local_rbf_map(fluid, solid, 0.12, n_neighbors=12)
+    with operation("construct_RBF_transfer_map", heartbeat_s,
+                   detail=f"fluid={nf} solid={ns} radius=0.12 neighbors=12"):
+        nbr, weights = RBFTransfer.build_local_rbf_map(fluid, solid, 0.12, n_neighbors=12)
     A = np.full(nf, 1.0 / nf)
     lumped = RBFTransfer.compute_S_lumped(ns, nbr, weights, A)
     forces = (
@@ -129,7 +138,9 @@ def verify_rbf_component():
     )
     force_results = []
     for force in forces:
-        mapped_density, _ = RBFTransfer.apply_Tf_operator(force, ns, nbr, weights, A, lumped)
+        with operation("apply_RBF_conservative_force_map", heartbeat_s,
+                       detail=f"force_shape={force.shape}"):
+            mapped_density, _ = RBFTransfer.apply_Tf_operator(force, ns, nbr, weights, A, lumped)
         integral = np.sum(mapped_density * lumped[:, None], axis=0)
         reference = np.sum(force * A[:, None], axis=0)
         resultant_error = float(np.linalg.norm(integral - reference) / max(np.linalg.norm(reference), 1e-16))
@@ -144,7 +155,9 @@ def verify_rbf_component():
                               "moment_relative_discrepancy_measured_not_constrained": moment_error})
 
     solid_virtual = np.column_stack((np.sin(np.pi*y_s), y_s**2, np.cos(np.pi*y_s)))
-    fluid_virtual = RBFTransfer.apply_rbf_interpolation(solid_virtual, nbr, weights)
+    with operation("apply_RBF_kinematic_interpolation", heartbeat_s,
+                   detail=f"virtual_shape={solid_virtual.shape}"):
+        fluid_virtual = RBFTransfer.apply_rbf_interpolation(solid_virtual, nbr, weights)
     force = forces[1]
     mapped_density, _ = RBFTransfer.apply_Tf_operator(force, ns, nbr, weights, A, lumped)
     work_fluid = float(np.sum(force * A[:, None] * fluid_virtual))
@@ -161,17 +174,25 @@ def verify_rbf_component():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config-dir", default=str(ROOT / "config"))
+    parser.add_argument("--heartbeat-seconds", type=float, default=10.0)
     args = parser.parse_args()
+    started = perf_counter()
+    log(f"MMS SUITE START | argv={sys.argv!r} python={sys.executable} config={args.config_dir} output={OUT}")
     OUT.mkdir(parents=True, exist_ok=True)
-    with open(Path(args.config_dir) / "solid_params.yaml") as stream:
-        solid_cfg = yaml.safe_load(stream)
-    tests = {
-        "taylor_green_analytic_identity": verify_taylor_green(),
-        "nonlinear_membrane_energy_variation": verify_nonlinear_membrane_variation(),
-        "plate_symbolic_manufactured_loads": verify_plate_symbolics(solid_cfg),
-        "rbf_weighted_resultant_component": verify_rbf_component(),
-        "scalar_generalized_alpha": run_scalar_test(OUT),
-    }
+    with operation("load_solid_configuration", args.heartbeat_seconds):
+        with open(Path(args.config_dir) / "solid_params.yaml") as stream:
+            solid_cfg = yaml.safe_load(stream)
+    tests = {}
+    stages = (
+        ("taylor_green_analytic_identity", lambda: verify_taylor_green()),
+        ("nonlinear_membrane_energy_variation", verify_nonlinear_membrane_variation),
+        ("plate_symbolic_manufactured_loads", lambda: verify_plate_symbolics(solid_cfg, args.heartbeat_seconds)),
+        ("rbf_weighted_resultant_component", lambda: verify_rbf_component(args.heartbeat_seconds)),
+        ("scalar_generalized_alpha", lambda: run_scalar_test(OUT)),
+    )
+    for name, check in stages:
+        with operation(f"MMS_{name}", args.heartbeat_seconds):
+            tests[name] = check()
     tests["full_rvpm_equation_mms"] = {
         "status": "NOT_IMPLEMENTED",
         "reason": "FLOWVPM's production particle integrator has no general manufactured vorticity-source injection; adding a classical Navier-Stokes source would not match its filtered rVPM equations.",
@@ -267,7 +288,9 @@ def main():
         "", "Outputs: `mms_metrics.csv`, `mms_summary.json`, `flowvpm_component_metrics.csv`, `scalar_generalized_alpha.csv`, `scalar_generalized_alpha.png`, `plate_exact_displacement.png`."
     ])
     (OUT / "MMS_REPORT.md").write_text("\n".join(lines) + "\n")
-    print(json.dumps(summary, indent=2))
+    log(f"MMS SUITE DONE | status=PASS | elapsed={perf_counter()-started:.3f}s "
+        f"report={OUT / 'MMS_REPORT.md'} summary={OUT / 'mms_summary.json'}")
+    print(json.dumps(summary, indent=2), flush=True)
 
 
 if __name__ == "__main__":

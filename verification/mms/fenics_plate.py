@@ -20,11 +20,12 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 from plate import make_plate_mms
+from progress import log, operation
 
 try:
     from dolfin import (
         Constant, Expression, Function, FunctionAssigner,
-        VectorFunctionSpace, assemble, derivative, dx, interpolate, inner,
+        VectorFunctionSpace, assemble, derivative, dx, interpolate, inner, project,
         parameters, split, solve,
     )
 except ImportError as exc:
@@ -40,17 +41,17 @@ def expression_code(expr):
     return re.sub(r"\by\b", "x[1]", code)
 
 
-def scalar_expr(expr, time=0.0):
-    return Expression(expression_code(expr), degree=16, t=float(time))
+def scalar_expr(expr, time=0.0, degree=8):
+    return Expression(expression_code(expr), degree=degree, t=float(time))
 
 
-def vector_expr(expr, time=0.0):
-    return Expression(tuple(expression_code(expr[i]) for i in range(len(expr))), degree=16, t=float(time))
+def vector_expr(expr, time=0.0, degree=8):
+    return Expression(tuple(expression_code(expr[i]) for i in range(len(expr))), degree=degree, t=float(time))
 
 
 def tensor_vector_expr(expr, time):
     values = tuple(expression_code(expr[i, j]) for i in range(2) for j in range(2))
-    return Expression(values, degree=16, t=float(time))
+    return Expression(values, degree=8, t=float(time))
 
 
 def expression_state(fields, time=0.0):
@@ -71,52 +72,64 @@ def make_mixed_function(model, exact_fields, time, spaces, assigner):
     return result
 
 
-def state_l2_error_and_reference(q_function, exact_expressions, time):
+def state_l2_error_and_reference(q_function, exact_expressions, time, measure, heartbeat_s=10.0, detail=""):
     """Return componentwise squared L2 error/reference norms at one time."""
     numerical = split(q_function)
     for expression in exact_expressions:
         expression.t = time
     errors, references = [], []
-    for value, exact in zip(numerical, exact_expressions):
-        error_sq = float(assemble(inner(value - exact, value - exact) * dx))
-        reference_sq = float(assemble(inner(exact, exact) * dx))
+    for index, (value, exact) in enumerate(zip(numerical, exact_expressions)):
+        with operation("assemble_exact_state_error_norm", heartbeat_s,
+                       detail=f"{detail} field={index}"):
+            error_sq = float(assemble(inner(value - exact, value - exact) * measure))
+        with operation("assemble_exact_state_reference_norm", heartbeat_s,
+                       detail=f"{detail} field={index}"):
+            reference_sq = float(assemble(inner(exact, exact) * measure))
         errors.append(max(error_sq, 0.0))
         references.append(max(reference_sq, 0.0))
     return errors, references
 
 
-def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv):
+def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=10.0):
     wall_start = perf_counter()
+    formulation = "nonlinear" if nonlinear else "linear"
+    log(f"CASE START | formulation={formulation} nx={nx} ny={ny} dt={dt} duration={duration} "
+        f"config={Path(config_dir).resolve()} output={out_csv}")
     with open(Path(config_dir) / "solid_params.yaml") as stream:
         cfg = yaml.safe_load(stream)
-    mms = make_plate_mms(cfg, nonlinear, cfg.get("include_quadratic_inplane_strain", True))
-    domain = SolidDomain(
-        cfg["span"], cfg["root_chord"], cfg["tip_chord"], cfg["thickness_ratio"],
-        cfg.get("leading_edge_sweep", 0.0), nx, ny, min(ny, 40), "midpoint",
-    )
-    model = ReissnerMindlinModel(
-        domain, cfg["E"], cfg["nu"], cfg["rho_s"], cfg["eta_m"], cfg["eta_k"],
-        cfg["kappa_shear"], Constant(dt), cfg.get("alpha_m", 0.1), cfg.get("alpha_f", 0.2),
-        geometric_nonlinearity=nonlinear,
-        include_quadratic_inplane_strain=cfg.get("include_quadratic_inplane_strain", True),
-    )
+    with operation("symbolic_manufactured_solution", heartbeat_s, detail=f"formulation={formulation}"):
+        mms = make_plate_mms(cfg, nonlinear, cfg.get("include_quadratic_inplane_strain", True),
+                             operation_factory=lambda stage, **kw: operation(
+                                 stage, heartbeat_s, detail=f"formulation={formulation}"))
+    with operation("construct_finite_element_model_and_UFL_forms", heartbeat_s,
+                   detail=f"formulation={formulation} mesh={nx}x{ny}"):
+        domain = SolidDomain(
+            cfg["span"], cfg["root_chord"], cfg["tip_chord"], cfg["thickness_ratio"],
+            cfg.get("leading_edge_sweep", 0.0), nx, ny, min(ny, 40), "midpoint",
+        )
+        model = ReissnerMindlinModel(
+            domain, cfg["E"], cfg["nu"], cfg["rho_s"], cfg["eta_m"], cfg["eta_k"],
+            cfg["kappa_shear"], Constant(dt), cfg.get("alpha_m", 0.1), cfg.get("alpha_f", 0.2),
+            geometric_nonlinearity=nonlinear,
+            include_quadratic_inplane_strain=cfg.get("include_quadratic_inplane_strain", True),
+        )
     spaces = [model.V.sub(i).collapse() for i in range(3)]
     assigner = FunctionAssigner(model.V, spaces)
     exact_u, exact_w, exact_theta = mms.fields
     exact_fields = (exact_u, exact_w, exact_theta)
     exact_velocity = tuple(value.diff(mms.t) for value in exact_fields)
     exact_acceleration = tuple(value.diff(mms.t, 2) for value in exact_fields)
-    # UFL differential operators such as grad() need coefficients tied to a
-    # mesh. Plain legacy DOLFIN Expressions have no geometric dimension, so
-    # interpolate the manufactured states into the production mixed space.
-    q_star = Function(model.V, name="ManufacturedDisplacement")
-    v_star = Function(model.V, name="ManufacturedVelocity")
-    a_star = Function(model.V, name="ManufacturedAcceleration")
-    # Continuous-equation MMS: use production weak operators to build the
-    # continuous load, but evaluate every manufactured field at one physical
-    # force time. The generalized-alpha residual still uses its own alpha_m/f
-    # stages, so its time-discretization error is not canceled by the forcing.
-    source = model.manufactured_weak_load(q_star, v_star, a_star, model.q_test)
+    # The independent symbolic strong source is the manufactured forcing.
+    # Only displacement/velocity/acceleration states are interpolated; the
+    # production weak operators are checked independently by strong_weak_check.
+    force_u = vector_expr(mms.loads[0], degree=8)
+    force_w = scalar_expr(mms.loads[1], degree=8)
+    force_theta = vector_expr(mms.loads[2], degree=8)
+    test_u, test_w, test_theta = split(model.q_test)
+    with operation("construct_independent_strong_source_form", heartbeat_s,
+                   detail=f"formulation={formulation}"):
+        source_measure = dx(domain=domain.mesh, metadata={"quadrature_degree": 24})
+        source = (inner(force_u, test_u) + force_w * test_w + inner(force_theta, test_theta)) * source_measure
     model.jacobian = derivative(model.residual, model.q, model.dq_trial)
     newton_atol = float(cfg.get("newton_atol", 1.0e-8))
     newton_rtol = float(cfg.get("newton_rtol", 1.0e-6))
@@ -127,51 +140,71 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv):
     model.v_old.assign(make_mixed_function(model, tuple(v.diff(mms.t) for v in exact_fields), 0, spaces, assigner))
     model.a_old.assign(make_mixed_function(model, tuple(v.diff(mms.t, 2) for v in exact_fields), 0, spaces, assigner))
     q0 = split(model.q_old)
-    exact_error_fields = (vector_expr(exact_u, 0.0), scalar_expr(exact_w, 0.0),
+    exact_error_fields = (vector_expr(exact_u, 0.0, degree=8), scalar_expr(exact_w, 0.0, degree=8),
                            vector_expr(exact_theta, 0.0))
-    initial_projection_errors = [
-        float(np.sqrt(assemble(inner(q0[i] - exact_error_fields[i], q0[i] - exact_error_fields[i]) * dx)))
-        for i in range(3)
-    ]
+    initial_projection_errors = []
+    for i in range(3):
+        with operation("assemble_initial_projection_error", heartbeat_s,
+                       detail=f"formulation={formulation} field={i} mesh={nx}x{ny}"):
+            initial_projection_errors.append(float(np.sqrt(assemble(
+                inner(q0[i] - exact_error_fields[i], q0[i] - exact_error_fields[i]) * source_measure
+            ))))
     exact_velocity_fields = expression_state(exact_velocity, 0.0)
     exact_acceleration_fields = expression_state(exact_acceleration, 0.0)
     initial_velocity_errors, _ = state_l2_error_and_reference(
-        model.v_old, exact_velocity_fields, 0.0
+        model.v_old, exact_velocity_fields, 0.0, source_measure, heartbeat_s,
+        f"formulation={formulation} initial velocity mesh={nx}x{ny}",
     )
     initial_acceleration_errors, _ = state_l2_error_and_reference(
-        model.a_old, exact_acceleration_fields, 0.0
+        model.a_old, exact_acceleration_fields, 0.0, source_measure, heartbeat_s,
+        f"formulation={formulation} initial acceleration mesh={nx}x{ny}",
     )
     initial_velocity_projection_errors = [float(np.sqrt(value)) for value in initial_velocity_errors]
     initial_acceleration_projection_errors = [float(np.sqrt(value)) for value in initial_acceleration_errors]
     integrated_error_sq = np.zeros(3)
     integrated_reference_sq = np.zeros(3)
-    previous_errors, previous_references = state_l2_error_and_reference(model.q_old, exact_error_fields, 0.0)
+    previous_errors, previous_references = state_l2_error_and_reference(
+        model.q_old, exact_error_fields, 0.0, source_measure, heartbeat_s,
+        f"formulation={formulation} initial displacement mesh={nx}x{ny}",
+    )
 
     nsteps = int(round(duration / dt))
+    case_step_start = perf_counter()
     for step in range(1, nsteps + 1):
-        # The applied continuous load is sampled at the production force time
-        # t_f=t_(n+1)-alpha_f*dt. In contrast, model.residual uses a_(n+alpha_m)
-        # and q/v_(n+alpha_f), exactly as the generalized-alpha method requires.
+        # Sample the independent continuous strong load at the force time.
+        # The residual separately uses a_(n+alpha_m) and q/v_(n+alpha_f).
         t_alpha_f = step * dt - float(cfg.get("alpha_f", 0.2)) * dt
-        q_star.assign(make_mixed_function(model, exact_fields, t_alpha_f, spaces, assigner))
-        v_star.assign(make_mixed_function(model, exact_velocity, t_alpha_f, spaces, assigner))
-        a_star.assign(make_mixed_function(model, exact_acceleration, t_alpha_f, spaces, assigner))
-        force_vector = assemble(source)
+        force_u.t = t_alpha_f
+        force_w.t = t_alpha_f
+        force_theta.t = t_alpha_f
+        log(f"STEP | formulation={formulation} case_mesh={nx}x{ny} step={step}/{nsteps} "
+            f"dt={dt} final_time={duration} case_elapsed={perf_counter()-case_step_start:.1f}s")
+        with operation("assemble_independent_strong_load_JIT_included", heartbeat_s,
+                       detail=f"formulation={formulation} step={step}/{nsteps}"):
+            force_vector = assemble(source)
         converged = False
         initial_norm = None
         for iteration in range(newton_maxit):
-            A = assemble(model.jacobian)
-            rhs = assemble(model.residual)
+            with operation("assemble_Newton_jacobian", heartbeat_s,
+                           detail=f"formulation={formulation} step={step}/{nsteps} Newton={iteration+1}"):
+                A = assemble(model.jacobian)
+            with operation("assemble_Newton_residual", heartbeat_s,
+                           detail=f"formulation={formulation} step={step}/{nsteps} Newton={iteration+1}"):
+                rhs = assemble(model.residual)
             rhs *= -1.0
             rhs.axpy(1.0, force_vector)
             for bc in model.bcs:
                 bc.apply(A, rhs)
             norm = rhs.norm("l2")
+            log(f"NEWTON | formulation={formulation} step={step}/{nsteps} iteration={iteration+1} "
+                f"residual={norm:.8e} atol={newton_atol:.3e} rtol={newton_rtol:.3e}")
             initial_norm = norm if initial_norm is None else initial_norm
             if norm <= newton_atol or norm / max(initial_norm, 1e-30) <= newton_rtol:
                 converged = True
                 break
-            solve(A, model.dq_newton.vector(), rhs, "mumps")
+            with operation("linear_solve_mumps", heartbeat_s,
+                           detail=f"formulation={formulation} step={step}/{nsteps} Newton={iteration+1}"):
+                solve(A, model.dq_newton.vector(), rhs, "mumps")
             model.q.vector().axpy(1.0, model.dq_newton.vector())
             model.q.vector().apply("insert")
         if not converged:
@@ -181,7 +214,8 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv):
             )
         model.update_fields()
         current_errors, current_references = state_l2_error_and_reference(
-            model.q_old, exact_error_fields, step * dt
+            model.q_old, exact_error_fields, step * dt, source_measure, heartbeat_s,
+            f"formulation={formulation} step={step}/{nsteps} displacement",
         )
         integrated_error_sq += 0.5 * dt * (np.asarray(previous_errors) + np.asarray(current_errors))
         integrated_reference_sq += 0.5 * dt * (np.asarray(previous_references) + np.asarray(current_references))
@@ -267,12 +301,14 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv):
     }
     for name, num_expr in num_kin.items():
         ref_expr = mms.kinematics[name]
-        if isinstance(ref_expr, sp.MatrixBase) and ref_expr.shape == (2, 2):
-            reference = interpolate(tensor_vector_expr(ref_expr, final_time), V4)
-            numeric = interpolate(num_expr, V4)
-        else:
-            reference = interpolate(vector_expr(ref_expr, final_time), V2)
-            numeric = interpolate(num_expr, V2)
+        with operation("project_final_kinematic_diagnostic", heartbeat_s,
+                       detail=f"formulation={formulation} field={name} mesh={nx}x{ny}"):
+            if isinstance(ref_expr, sp.MatrixBase) and ref_expr.shape == (2, 2):
+                reference = interpolate(tensor_vector_expr(ref_expr, final_time), V4)
+                numeric = project(num_expr, V4)
+            else:
+                reference = interpolate(vector_expr(ref_expr, final_time), V2)
+                numeric = project(num_expr, V2)
         err = float(np.sqrt(assemble(inner(numeric-reference, numeric-reference) * dx)))
         ref = float(np.sqrt(assemble(inner(reference, reference) * dx)))
         row[f"{name}_relative_l2"] = err / ref if ref > 1e-30 else err
@@ -303,7 +339,8 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv):
     axes[2].set_xlabel("Chordwise x [m]")
     axes[2].set_ylabel("Spanwise y [m]")
     fig.colorbar(contour, ax=axes[2], label="w error [mm]")
-    fig.savefig(field_dir / f"plate_{row['formulation']}_{nx}x{ny}_field_error.png", dpi=170)
+    plot_path = field_dir / f"plate_{row['formulation']}_{nx}x{ny}_field_error.png"
+    fig.savefig(plot_path, dpi=170)
     plt.close(fig)
     row["wall_runtime_s"] = perf_counter() - wall_start
     out_csv = Path(out_csv)
@@ -315,10 +352,14 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv):
             writer.writeheader()
         writer.writerow(row)
     print(row)
+    log(f"CASE DONE | status=PASS | formulation={formulation} mesh={nx}x{ny} "
+        f"steps={nsteps} final_time={final_time} elapsed={row['wall_runtime_s']:.3f}s "
+        f"csv={out_csv} plot={plot_path}")
     return row
 
 
 def main():
+    started = perf_counter()
     parser = argparse.ArgumentParser()
     parser.add_argument("--config-dir", default=str(ROOT / "config"))
     parser.add_argument("--nx", type=int, default=12)
@@ -327,9 +368,16 @@ def main():
     parser.add_argument("--duration", type=float, default=0.05)
     parser.add_argument("--nonlinear", action="store_true")
     parser.add_argument("--output", default=str(Path(__file__).parent / "results" / "plate_fenics.csv"))
+    parser.add_argument("--heartbeat-seconds", type=float, default=10.0)
     args = parser.parse_args()
     parameters["form_compiler"]["optimize"] = True
-    run_case(args.config_dir, args.nx, args.ny, args.dt, args.duration, args.nonlinear, args.output)
+    try:
+        run_case(args.config_dir, args.nx, args.ny, args.dt, args.duration, args.nonlinear,
+                 args.output, args.heartbeat_seconds)
+    except BaseException:
+        import traceback
+        log(f"CASE FAILED | elapsed={perf_counter()-started:.3f}s\n{traceback.format_exc()}")
+        raise
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ class ReissnerMindlinModel:
         alpha_f=0.20,
         geometric_nonlinearity=True,
         include_quadratic_inplane_strain=True,
+        quadrature_degree=None,
     ):
         self.domain = domain
         self.E = float(E)
@@ -41,6 +42,8 @@ class ReissnerMindlinModel:
         self.eta_k = Constant(float(eta_k))
         self.kappa_shear = Constant(float(kappa_shear))
         self.h = domain.h
+        measure_metadata = {} if quadrature_degree is None else {"quadrature_degree": int(quadrature_degree)}
+        self.dx = dx(domain=domain.mesh, metadata=measure_metadata)
         self.dt = dt
         # Kept configurable so the previous linear formulation remains an
         # available baseline without changing the mixed-space/FSI interfaces.
@@ -187,9 +190,9 @@ class ReissnerMindlinModel:
             u_x, w_x, theta_x = split(q_test)
 
         inertia_rot = self.rho * self.h ** 3 / 12.0
-        return self.rho * self.h * (inner(u_t, u_x) + w_t * w_x) * dx + inertia_rot * inner(
+        return self.rho * self.h * (inner(u_t, u_x) + w_t * w_x) * self.dx + inertia_rot * inner(
             theta_t, theta_x
-        ) * dx
+        ) * self.dx
 
     def stiffness_form(self, q_trial, q_test):
         """Linear elastic bilinear form and Rayleigh reference stiffness."""
@@ -213,9 +216,9 @@ class ReissnerMindlinModel:
         G_shear = Constant(self.E / (2.0 * (1.0 + self.nu)))
         K_shear = self.kappa_shear * G_shear * self.h
         return (
-            inner(N_t, eps_x) * dx
-            + inner(M_t, kap_x) * dx
-            + K_shear * inner(gam_t, gam_x) * dx
+            inner(N_t, eps_x) * self.dx
+            + inner(M_t, kap_x) * self.dx
+            + K_shear * inner(gam_t, gam_x) * self.dx
         )
 
     def damping_form(self, q_trial, q_test):
@@ -244,27 +247,29 @@ class ReissnerMindlinModel:
         It is a residual (linear in ``q_test``), rather than a bilinear
         stiffness form, so UFL can construct its complete consistent tangent.
         """
+        return sum(self.internal_work_components(q_state, q_test).values())
+
+    def internal_work_components(self, q_state, q_test):
+        """Return membrane, bending, and shear contributions separately."""
         u_mem, w, theta = self.split_state(q_state)
         delta_u, delta_w, delta_theta = self.split_state(q_test)
-
-        if not self.geometric_nonlinearity:
-            return self.stiffness_form(q_state, q_test)
-
-        eps_virtual = self.nonlinear_membrane_variation(
-            u_mem, w, delta_u, delta_w
-        )
-        N = self.nonlinear_membrane_stress(u_mem, w)
+        if self.geometric_nonlinearity:
+            eps_virtual = self.nonlinear_membrane_variation(u_mem, w, delta_u, delta_w)
+            N = self.nonlinear_membrane_stress(u_mem, w)
+        else:
+            eps_virtual = self.membrane_strain(delta_u)
+            N = self.membrane_stress(u_mem)
         M = self.bending_moment(theta)
         gamma = self.shear_strain(theta, w)
         delta_kappa = self.curvature(delta_theta)
         delta_gamma = self.shear_strain(delta_theta, delta_w)
         G_shear = Constant(self.E / (2.0 * (1.0 + self.nu)))
         K_shear = self.kappa_shear * G_shear * self.h
-        return (
-            inner(N, eps_virtual) * dx
-            + inner(M, delta_kappa) * dx
-            + K_shear * inner(gamma, delta_gamma) * dx
-        )
+        return {
+            "membrane": inner(N, eps_virtual) * self.dx,
+            "bending": inner(M, delta_kappa) * self.dx,
+            "shear": K_shear * inner(gamma, delta_gamma) * self.dx,
+        }
 
     def manufactured_weak_load(self, q_state, velocity_state, acceleration_state, q_test):
         """Evaluate the production inertial, damping, and internal weak operators.

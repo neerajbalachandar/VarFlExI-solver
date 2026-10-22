@@ -16,6 +16,8 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
+import traceback
 
 import matplotlib
 matplotlib.use("Agg")
@@ -25,6 +27,8 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "results"
+sys.path.insert(0, str(HERE))
+from progress import log, operation
 
 
 def cases(study):
@@ -55,6 +59,9 @@ def main():
     parser.add_argument("--execute", action="store_true", help="Run cases using the active Python/FEniCS environment.")
     parser.add_argument("--formulation", choices=("linear", "nonlinear", "both"), default="both")
     parser.add_argument("--config-dir", default=str(ROOT / "config"))
+    parser.add_argument("--heartbeat-seconds", type=float, default=10.0)
+    parser.add_argument("--case-timeout-seconds", type=float, default=0.0,
+                        help="optional per-case subprocess timeout; 0 disables it")
     args = parser.parse_args()
     with open(Path(args.config_dir) / "solid_params.yaml") as stream:
         import yaml
@@ -95,11 +102,16 @@ def main():
         "solid_config_sha256": config_hash,
         "cases": [],
     }
+    case_index = 0
+    total_cases = len(planned) * len(formulations)
     for formulation in formulations:
         for case in planned:
-            command = [sys.executable, str(HERE / "fenics_plate.py"), "--config-dir", args.config_dir,
+            case_index += 1
+            case_start = perf_counter()
+            command = [sys.executable, "-u", str(HERE / "fenics_plate.py"), "--config-dir", args.config_dir,
                        "--nx", str(case["nx"]), "--ny", str(case["ny"]), "--dt", str(case["dt"]),
-                       "--duration", str(case["duration"]), "--output", str(raw)]
+                       "--duration", str(case["duration"]), "--output", str(raw),
+                       "--heartbeat-seconds", str(args.heartbeat_seconds)]
             if formulation == "nonlinear":
                 command.append("--nonlinear")
             record = {"formulation": formulation, **case, "command": command,
@@ -107,16 +119,30 @@ def main():
             manifest["cases"].append(record)
             manifest_path.write_text(json.dumps(manifest, indent=2))
             try:
-                completed = subprocess.run(command, cwd=ROOT, check=False)
+                with operation("refinement_case", args.heartbeat_seconds,
+                               detail=f"case={case_index}/{total_cases} formulation={formulation} "
+                                      f"mesh={case['nx']}x{case['ny']} dt={case['dt']} "
+                                      f"final_time={case['duration']}"):
+                    completed = subprocess.run(
+                        command, cwd=ROOT, check=False, bufsize=1,
+                        timeout=args.case_timeout_seconds or None,
+                    )
                 record["return_code"] = completed.returncode
                 record["status"] = "completed" if completed.returncode == 0 else "failed"
+                record["elapsed_s"] = perf_counter() - case_start
                 manifest_path.write_text(json.dumps(manifest, indent=2))
                 if completed.returncode != 0:
                     raise subprocess.CalledProcessError(completed.returncode, command)
             except Exception as exc:
-                record["status"] = "failed"
+                record["status"] = "TIMED OUT" if isinstance(exc, subprocess.TimeoutExpired) else "FAIL"
                 record["error"] = repr(exc)
+                record["traceback"] = traceback.format_exc()
+                record["elapsed_s"] = perf_counter() - case_start
                 manifest_path.write_text(json.dumps(manifest, indent=2))
+                log(f"CASE {record['status'].upper()} | case={case_index}/{total_cases} "
+                    f"formulation={formulation} mesh={case['nx']}x{case['ny']} dt={case['dt']} "
+                    f"final_time={case['duration']} elapsed={record['elapsed_s']:.3f}s "
+                    f"traceback={record['traceback']}")
                 raise
     rows = list(csv.DictReader(raw.open()))
     if not rows:
@@ -185,7 +211,9 @@ def main():
     ax.grid(True, which="both", alpha=0.25)
     ax.legend()
     fig.savefig(OUT / f"plate_{args.study}_convergence.png", dpi=180)
-    print(f"Saved measured errors and convergence plot under {OUT}")
+    log(f"REFINEMENT DONE | study={args.study} cases={len(rows)} status=PASS "
+        f"csv={OUT / f'plate_{args.study}_convergence.csv'} "
+        f"plot={OUT / f'plate_{args.study}_convergence.png'} manifest={manifest_path}")
 
 
 if __name__ == "__main__":

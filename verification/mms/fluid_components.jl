@@ -1,10 +1,46 @@
 using FLOWUnsteady
+using Dates
 using LinearAlgebra: cross, norm
 import FLOWVPM as vpm
 import FLOWVLM as vlm
 
 const OUT = joinpath(@__DIR__, "results")
 mkpath(OUT)
+
+const HEARTBEAT_SECONDS = let arg = findfirst(value -> startswith(value, "--heartbeat-seconds="), ARGS)
+    arg === nothing ? 10.0 : parse(Float64, split(ARGS[arg], "="; limit=2)[2])
+end
+
+function progress(message)
+    println("[", Dates.format(now(), dateformat"yyyy-mm-ddTHH:MM:SS.sss"), "] ", message)
+    flush(stdout)
+end
+
+function timed_stage(f::Function, name::String)
+    started = time()
+    progress("START | stage=$name")
+    finished = Channel{Nothing}(1)
+    heartbeat = @async begin
+        while true
+            status = timedwait(() -> isready(finished), HEARTBEAT_SECONDS; pollint=0.5)
+            status == :ok && break
+            progress("HEARTBEAT | stage=$name | elapsed=$(round(time()-started; digits=1))s | operation still running")
+        end
+    end
+    try
+        result = f()
+        progress("DONE | stage=$name | elapsed=$(round(time()-started; digits=3))s")
+        return result
+    catch err
+        progress("FAIL | stage=$name | elapsed=$(round(time()-started; digits=3))s | $(sprint(showerror, err))")
+        rethrow()
+    finally
+        put!(finished, nothing)
+        wait(heartbeat)
+    end
+end
+
+progress("FLUID COMPONENT VERIFICATION START | argv=$(ARGS) heartbeat=$(HEARTBEAT_SECONDS)s output=$OUT")
 
 function radial_integral(f, rmax=8.0, n=20001)
     dr = rmax / (n - 1)
@@ -17,7 +53,9 @@ function radial_integral(f, rmax=8.0, n=20001)
     return total
 end
 
-normalization = radial_integral(vpm.zeta_gauserf)
+normalization = timed_stage("gaussianerf_kernel_radial_integral") do
+    radial_integral(vpm.zeta_gauserf)
+end
 abs(normalization - 1.0) < 2e-7 || error("Gaussian-erf kernel normalization failed: $normalization")
 abs(vpm.g_gauserf(0.0)) < 1e-14 || error("Gaussian-erf velocity kernel is not regular at the origin")
 abs(vpm.g_gauserf(8.0) - 1.0) < 1e-12 || error("Gaussian-erf velocity kernel does not approach the Newtonian limit")
@@ -29,8 +67,10 @@ scheme = vpm.CoreSpreading(nu, sigma0, 1.0)
 pfield = vpm.ParticleField(4, Float64;
     viscous=scheme, integration=vpm.rungekutta3, kernel=vpm.kernel_gaussianerf)
 vpm.add_particle(pfield, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], sigma0)
-for (a, b) in ((0.0, 1/3), (-5/9, 15/16), (-153/128, 8/15))
-    vpm.viscousdiffusion(pfield, scheme, dt; aux1=a, aux2=b)
+timed_stage("RK3_core_spreading_update") do
+    for (a, b) in ((0.0, 1/3), (-5/9, 15/16), (-153/128, 8/15))
+        vpm.viscousdiffusion(pfield, scheme, dt; aux1=a, aux2=b)
+    end
 end
 sigma = vpm.get_sigma(vpm.get_particle(pfield, 1))[]
 sigma2_error = abs(sigma^2 - sigma0^2 - 2nu*dt)
@@ -54,9 +94,11 @@ function prescribed_zero_gradient!(field; kwargs...)
         vpm.get_J(field, i) .= 0.0
     end
 end
-for _ in 1:n_advect
-    vpm.rungekutta3(advect_field, dt_advect; custom_UJ=prescribed_zero_gradient!)
-    advect_field.t += dt_advect
+timed_stage("particle_ODE_MMS_RK3_prescribed_U_J") do
+    for _ in 1:n_advect
+        vpm.rungekutta3(advect_field, dt_advect; custom_UJ=prescribed_zero_gradient!)
+        advect_field.t += dt_advect
+    end
 end
 x_expected = x0 .+ n_advect * dt_advect .* u_test
 x_actual = collect(vpm.get_X(advect_field, 1))
@@ -76,7 +118,9 @@ sigma_source = 0.2
 x_target = [1.0, 0.0, 0.0]
 vpm.add_particle(velocity_field, x_source, gamma_source, sigma_source)
 vpm.add_particle(velocity_field, x_target, zeros(3), sigma_source)
-vpm.UJ_direct(velocity_field; reset=true)
+timed_stage("direct_UJ_velocity_reconstruction") do
+    vpm.UJ_direct(velocity_field; reset=true)
+end
 r = x_target - x_source
 u_reference = vpm.g_gauserf(norm(r)/sigma_source) .* cross(gamma_source, r) ./ (4pi*norm(r)^3)
 u_actual = collect(vpm.get_U(velocity_field, 2))
@@ -88,7 +132,9 @@ wing = vlm.Wing(0.0, 0.0, 0.0, 1.0, 0.0)
 vlm.addchord(wing, 0.0, 1.0, 0.0, 1.0, 0.0, 4; r=1.0)
 system = vlm.WingSystem()
 vlm.addwing(system, "Wing", wing)
-vlm.setVinf(system, Vinf)
+timed_stage("FLOWVLM_freestream_registration") do
+    vlm.setVinf(system, Vinf)
+end
 system.sol["Gamma"] = zeros(vlm.get_m(system))
 horseshoe = vlm.getHorseshoe(system, 1; t=0.0)
 length(horseshoe) == 8 || error("FLOWVLM registered-freestream horseshoe smoke test failed")
@@ -109,3 +155,4 @@ println("  RK3 sigma^2 increment      = $(sigma^2-sigma0^2) (expected $(2nu*dt))
 println("  RK3 prescribed-velocity particle advance = PASS")
 println("  FLOWVPM direct regularized velocity      = PASS")
 println("  FLOWVLM stored freestream  = PASS")
+progress("FLUID COMPONENT VERIFICATION DONE | status=PASS output=$(joinpath(OUT, "flowvpm_component_metrics.csv"))")

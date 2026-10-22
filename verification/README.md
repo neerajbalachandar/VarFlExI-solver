@@ -52,6 +52,8 @@ To execute the plate cases, use the legacy FEniCS interpreter in `fenics-env` an
 
 The plate MMS load in `fenics_plate.py` uses production `mass_form`, `damping_form`, and `internal_work`, with manufactured acceleration, velocity, and displacement all evaluated at the single continuous force time `t_f=t_(n+1)-alpha_f*dt`. The numerical residual still evaluates acceleration at `alpha_m` and displacement/velocity at `alpha_f`; this difference is the intended generalized-alpha time-discretization error. The independent strong source in `plate.py` is checked against production weak forms at one common physical time by `strong_weak_check.py`. The complete production residual/Jacobian finite-difference check is `jacobian_check.py`. Both require DOLFIN and are separate from the continuous plate convergence sweep.
 
+`strong_weak_check.py` has two diagnostic modes. `continuous` uses exact mesh-attached UFL fields on the weak side and the independent SymPy strong source, so it tests the weak/strong identity with compatible quadrature (degree 24). `production` projects the fields to the production CG2 representation; its discrepancies include projection error and are reported as `WITHIN_THRESHOLD` or `EXCEEDS_THRESHOLD`, not automatically called a formulation failure. To investigate refinement, pass multiple `--resolution NXxNY` options. `--quick` uses only `4x8` and is explicitly diagnostic, not final verification. CSV rows are flushed incrementally and paired with a JSON summary so earlier results survive a later failure. `--timeout-seconds` is optional; timed-out runs are recorded as `TIMED OUT`.
+
 This is the **continuous-equation MMS**. No discrete-equation consistency test is currently implemented; such a test would construct forcing from the actual generalized-alpha stage values and is useful for residual/update debugging, but it would suppress temporal truncation error and must not be used to claim temporal convergence. Other open items from the audit include a tolerance-backed moment test and complete CRM/geometry-to-FE transfer tests, plus direct-versus-FMM velocity/Jacobian comparisons. The existing Julia particle checks do not establish those properties.
 
 ### Fluid convergence status
@@ -61,7 +63,9 @@ There is currently **no fluid PDE or particle-field convergence sweep**. The Jul
 Run these from the repository root. `conda run` selects the environment without relying on the shell already being activated:
 
 ```bash
-conda run -n fenics-env python verification/mms/strong_weak_check.py
+conda run --no-capture-output -n fenics-env python -u verification/mms/strong_weak_check.py --formulation both --mode both
+conda run --no-capture-output -n fenics-env python -u verification/mms/strong_weak_check.py --formulation linear --mode continuous --quick --heartbeat-seconds 5
+conda run --no-capture-output -n fenics-env python -u verification/mms/strong_weak_check.py --disable-strong-weak-diagnostic
 conda run -n fenics-env python verification/mms/jacobian_check.py
 conda run -n fenics-env python verification/mms/fenics_plate.py --nx 12 --ny 32 --dt 0.0025 --duration 0.05
 conda run -n fenics-env python verification/mms/fenics_plate.py --nx 12 --ny 32 --dt 0.0025 --duration 0.05 --nonlinear
@@ -69,7 +73,9 @@ conda run -n fenics-env python verification/mms/refinement.py --study spatial --
 conda run -n fenics-env python verification/mms/refinement.py --study temporal --execute
 ```
 
-The strong/weak check writes `plate_strong_weak.csv/.json`; the Jacobian check writes `plate_jacobian_check.csv`; a single plate case appends to `plate_fenics.csv` and writes its exact/numerical/error field PNG. Refinement writes `plate_{spatial,temporal}_{plan,manifest,raw,convergence}` JSON/CSV files and a convergence PNG under `verification/mms/results/`. The manifest records the exact child command, case status/return code, and SHA-256 of `solid_params.yaml`; each completed raw row records the config hash, solver tolerances, mesh spacings/aspect ratio, and runtime. The analytic `run_mms.py` writes `mms_metrics.csv`, `mms_summary.json`, `MMS_REPORT.md`, and `plate_exact_displacement.png`; it does not execute any DOLFIN or Julia program.
+The strong/weak check writes `plate_strong_weak.csv/.json`; the Jacobian check writes `plate_jacobian_check.csv`; a single plate case appends to `plate_fenics.csv` and writes its exact/numerical/error field PNG. Refinement writes `plate_{spatial,temporal}_{plan,manifest,raw,convergence}` JSON/CSV files and a convergence PNG under `verification/mms/results/`. The manifest records the exact child command, case status/return code, and SHA-256 of `solid_params.yaml`; each completed raw row records the config hash, solver tolerances, mesh spacings/aspect ratio, and runtime. The analytic `run_mms.py` writes `mms_metrics.csv`, `mms_summary.json`, `MMS_REPORT.md`, and `plate_exact_displacement.png`; it does not execute any DOLFIN or Julia program. The plate solve and convergence sweep do not invoke or depend on `strong_weak_check.py`; disabling or failing that diagnostic does not gate the primary MMS.
+
+The existing test inventory has no filtered-vorticity/particle-field refinement driver and no CRM-to-FE verification driver. Progress/timing is added to the existing Julia particle component test and Python RBF algebra test, but these are not substitutes for those absent studies. Do not report filtered rVPM convergence or CRM verification as PASS based on the available component checks.
 
 ## Resolution audit and run generation
 
