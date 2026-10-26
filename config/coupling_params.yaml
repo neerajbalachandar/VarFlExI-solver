@@ -1,6 +1,6 @@
 
-total_time: 3.0
-n_steps: 3000
+total_time: 2.0
+n_steps: 2000
 
 host: 127.0.0.1
 port: 9000
@@ -34,4 +34,4 @@ send_cp: true
 send_le: true
 send_te: true
 
-results_root: results/rect_linear_regime/
+results_root: results/rect_nonlinear_regime/

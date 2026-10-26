@@ -10,9 +10,9 @@ leading_edge_sweep: 0.0
 nx: 30
 ny: 160
 
-results_root: results/rect_linear_regime/
+results_root: results/rect_nonlinear_regime/
 output_dir: solid/
-output_run_name: rect_linear_regime
+output_run_name: rect_nonlinear_regime
 
 xdmf_filename: elastodynamics-results.xdmf
 mesh_pvd_filename: solid_mesh.pvd
@@ -20,7 +20,7 @@ q_pvd_filename: plate_state.pvd
 sig_pvd_filename: membrane_stress.pvd
 diag_csv_filename: solid_v18_diagnostics.csv
 
-E: 3.0e9
+E: 3.0e7
 nu: 0.30
 rho_s: 1200.0
 

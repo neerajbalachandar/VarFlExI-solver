@@ -160,6 +160,68 @@ vpm_viscous = wake_cfg.viscous_scheme == "CoreSpreading" ?
               nothing
 vpm_sfs = configured_vpm_sfs(solver_cfg.vpm_sfs)
 
+# Preserve exact configs and effective solver settings for each execution.
+run_id = replace(string(round(Int, time() * 1.0e6)), "." => "")
+run_metadata_dir = joinpath(save_path, "_run_metadata", "$(run_name)_$(run_id)")
+mkpath(run_metadata_dir)
+config_snapshots = Dict{String, Any}()
+for (label, source) in (("fluid", args["fluid"]), ("solid", args["solid"]), ("coupling", args["coupling"]))
+    source_path = abspath(source)
+    isfile(source_path) || error("Cannot snapshot missing $(label) config: $(source_path)")
+    snapshot_path = joinpath(run_metadata_dir, "$(label)_params.yaml")
+    cp(source_path, snapshot_path; force=false)
+    config_snapshots[label] = Dict(
+        "path" => relpath(snapshot_path, save_path),
+        "sha256" => bytes2hex(sha256(read(source_path))),
+    )
+end
+run_metadata = Dict{String, Any}(
+    "schema_version" => 1,
+    "run_id" => run_id,
+    "created_utc" => string(Dates.now(Dates.UTC)),
+    "created_unix" => time(),
+    "run_name" => run_name,
+    "config_snapshots" => config_snapshots,
+    "effective" => Dict(
+        "dt" => dt, "nsteps" => nsteps, "rho" => rho, "nu" => nu,
+        "vinf" => magVinf, "aoa_deg" => AOA, "span" => span,
+        "root_chord" => root_chord, "tip_chord" => tip_chord,
+        "leading_edge_sweep" => leading_edge_sweep, "twist_root" => twist_root,
+        "twist_tip" => twist_tip, "n_span" => n_span, "p_per_step" => p_per_step,
+        "lambda_vpm" => lambda_vpm, "sigma_vpm_overwrite" => sigma_vpm_overwrite,
+        "max_particles" => max_particles,
+        "dynamic_particle_prefix" => run_name * "_pfield",
+        "static_particle_prefix" => run_name * "_staticpfield",
+        "viscous_scheme" => wake_cfg.viscous_scheme,
+        "vpm_sfs" => solver_cfg.vpm_sfs,
+        "fmm" => Dict(
+            "p" => wake_cfg.fmm_p, "ncrit" => wake_cfg.fmm_ncrit,
+            "theta" => wake_cfg.fmm_theta,
+            "shrink_recenter" => wake_cfg.fmm_shrink_recenter,
+            "relative_tolerance" => wake_cfg.fmm_relative_tolerance,
+            "absolute_tolerance" => wake_cfg.fmm_absolute_tolerance,
+            "autotune_p" => wake_cfg.fmm_autotune_p,
+            "autotune_ncrit" => wake_cfg.fmm_autotune_ncrit,
+            "autotune_regularization" => wake_cfg.fmm_autotune_regularization,
+            "default_rho_over_sigma" => wake_cfg.fmm_default_rho_over_sigma,
+            "minimum_ncrit" => wake_cfg.fmm_minimum_ncrit,
+        ),
+        "freestream" => Dict(
+            "gradient" => solver_cfg.freestream_gradient,
+            "oscillation" => solver_cfg.freestream_oscillation,
+            "wavenumber" => solver_cfg.freestream_wavenumber,
+            "frequency_hz" => solver_cfg.freestream_frequency,
+            "phase_rad" => solver_cfg.freestream_phase,
+            "reference" => solver_cfg.freestream_reference,
+        ),
+    ),
+)
+open(joinpath(run_metadata_dir, "run_metadata.json"), "w") do io
+    JSON.print(io, run_metadata, 2)
+    println(io)
+end
+println("Run provenance: $(joinpath(run_metadata_dir, "run_metadata.json"))")
+
 println(
     "Shedding config: spanwise-only wing, n_span=$(n_span), " *
     "wake_sphere_factor=$(wake_sphere_factor), wake_remove_every=$(wake_remove_every), " *

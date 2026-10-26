@@ -1,5 +1,5 @@
 
-run_name: rect_linear_regime
+run_name: rect_nonlinear_regime
 particles_per_step: 4
 save_every: 2
 
@@ -74,7 +74,7 @@ minimum_ncrit: 3
 viscous_scheme: CoreSpreading
 vpm_sfs: none
 
-save_directory: results/rect_linear_regime/fluid/
+save_directory: results/rect_nonlinear_regime/fluid/
 create_directory: true
 create_savepath: true
 prompt: false
