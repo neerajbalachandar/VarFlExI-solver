@@ -169,6 +169,9 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=1
     initial_acceleration_projection_errors = [float(np.sqrt(value)) for value in initial_acceleration_errors]
     integrated_error_sq = np.zeros(3)
     integrated_reference_sq = np.zeros(3)
+    step_newton_iterations = []
+    step_newton_initial_residuals = []
+    step_newton_final_residuals = []
     previous_errors, previous_references = state_l2_error_and_reference(
         model.q_old, exact_error_fields, 0.0, source_measure, heartbeat_s,
         f"formulation={formulation} initial displacement mesh={nx}x{ny}",
@@ -190,6 +193,7 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=1
             force_vector = assemble(source)
         converged = False
         initial_norm = None
+        step_initial_norm = None
         for iteration in range(newton_maxit):
             with operation("assemble_Newton_jacobian", heartbeat_s,
                            detail=f"formulation={formulation} step={step}/{nsteps} Newton={iteration+1}"):
@@ -206,6 +210,7 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=1
             log(f"NEWTON | formulation={formulation} step={step}/{nsteps} iteration={iteration+1} "
                 f"residual={norm:.8e} atol={newton_atol:.3e} rtol={newton_rtol:.3e}")
             initial_norm = norm if initial_norm is None else initial_norm
+            step_initial_norm = norm if step_initial_norm is None else step_initial_norm
             if norm <= newton_atol or norm / max(initial_norm, 1e-30) <= newton_rtol:
                 converged = True
                 break
@@ -248,6 +253,9 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=1
                 f"MMS Newton solve failed at step {step}: residual={norm:.4e}, "
                 f"atol={newton_atol:.3e}, rtol={newton_rtol:.3e}, maxit={newton_maxit}"
             )
+        step_newton_iterations.append(iteration + 1)
+        step_newton_initial_residuals.append(float(step_initial_norm))
+        step_newton_final_residuals.append(float(norm))
         model.update_fields()
         current_errors, current_references = state_l2_error_and_reference(
             model.q_old, exact_error_fields, step * dt, source_measure, heartbeat_s,
@@ -263,10 +271,25 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=1
     w_ref = interpolate(scalar_expr(exact_w, final_time), spaces[1])
     theta_ref = interpolate(vector_expr(exact_theta, final_time), spaces[2])
     q_ref = (u_ref, w_ref, theta_ref)
-    errors, refs = [], []
-    for numerical, reference in zip(q_num, q_ref):
-        errors.append(float(np.sqrt(assemble(inner(numerical-reference, numerical-reference) * dx))))
-        refs.append(float(np.sqrt(assemble(inner(reference, reference) * dx))))
+    final_exact_expressions = (
+        vector_expr(exact_u, final_time),
+        scalar_expr(exact_w, final_time),
+        vector_expr(exact_theta, final_time),
+    )
+    errors_sq, refs_sq = state_l2_error_and_reference(
+        model.q_old, final_exact_expressions, final_time, source_measure,
+        heartbeat_s, f"formulation={formulation} final continuous-target error",
+    )
+    errors = [float(np.sqrt(value)) for value in errors_sq]
+    refs = [float(np.sqrt(value)) for value in refs_sq]
+    final_interpolation_errors = [
+        float(np.sqrt(assemble(inner(projected - exact, projected - exact) * source_measure)))
+        for projected, exact in zip(q_ref, final_exact_expressions)
+    ]
+    discrete_vs_interpolant_errors = [
+        float(np.sqrt(assemble(inner(numerical - projected, numerical - projected) * source_measure)))
+        for numerical, projected in zip(q_num, q_ref)
+    ]
     names = ("inplane_u_l2", "transverse_w_l2", "rotation_theta_l2")
     row = {"formulation": formulation, "geometric_nonlinearity": bool(nonlinear),
            "include_quadratic_inplane_strain": bool(cfg.get("include_quadratic_inplane_strain", True)),
@@ -296,9 +319,19 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=1
            "initial_acceleration_projection_u_l2_m_s2": initial_acceleration_projection_errors[0],
            "initial_acceleration_projection_w_l2_m_s2": initial_acceleration_projection_errors[1],
            "initial_acceleration_projection_theta_l2_s2": initial_acceleration_projection_errors[2],
+           "final_interpolation_u_l2_m": final_interpolation_errors[0],
+           "final_interpolation_w_l2_m": final_interpolation_errors[1],
+           "final_interpolation_theta_l2": final_interpolation_errors[2],
+           "final_discrete_vs_interpolant_u_l2_m": discrete_vs_interpolant_errors[0],
+           "final_discrete_vs_interpolant_w_l2_m": discrete_vs_interpolant_errors[1],
+           "final_discrete_vs_interpolant_theta_l2": discrete_vs_interpolant_errors[2],
            "newton_atol": newton_atol, "newton_rtol": newton_rtol,
            "newton_maxit": newton_maxit, "newton_max_backtracks": newton_max_backtracks,
-           "newton_iterations_last_step": iteration + 1, "newton_residual_last_step": norm}
+           "newton_iterations_last_step": iteration + 1, "newton_residual_last_step": norm,
+           "newton_iterations_max_all_steps": max(step_newton_iterations),
+           "newton_residual_initial_max_all_steps": max(step_newton_initial_residuals),
+           "newton_residual_final_max_all_steps": max(step_newton_final_residuals),
+           "newton_residual_final_min_all_steps": min(step_newton_final_residuals)}
     for name, error, ref in zip(names, errors, refs):
         row[name] = error
         row[name.replace("_l2", "_relative_l2")] = error / ref if ref > 1e-15 else error
@@ -309,12 +342,12 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=1
             float(np.sqrt(error_sq / ref_sq)) if ref_sq > 1.0e-30 else float(np.sqrt(error_sq))
         )
     for comp, label in enumerate(("u_x", "u_y")):
-        err = float(np.sqrt(assemble((q_num[0][comp] - q_ref[0][comp])**2 * dx)))
-        ref = float(np.sqrt(assemble(q_ref[0][comp]**2 * dx)))
+        err = float(np.sqrt(assemble((q_num[0][comp] - final_exact_expressions[0][comp])**2 * source_measure)))
+        ref = float(np.sqrt(assemble(final_exact_expressions[0][comp]**2 * source_measure)))
         row[f"{label}_relative_l2"] = err / ref if ref > 1e-15 else err
     for comp, label in enumerate(("theta_x", "theta_y")):
-        err = float(np.sqrt(assemble((q_num[2][comp] - q_ref[2][comp])**2 * dx)))
-        ref = float(np.sqrt(assemble(q_ref[2][comp]**2 * dx)))
+        err = float(np.sqrt(assemble((q_num[2][comp] - final_exact_expressions[2][comp])**2 * source_measure)))
+        ref = float(np.sqrt(assemble(final_exact_expressions[2][comp]**2 * source_measure)))
         row[f"{label}_relative_l2"] = err / ref if ref > 1e-15 else err
     exact_velocity = tuple(v.diff(mms.t) for v in exact_fields)
     exact_acceleration = tuple(v.diff(mms.t, 2) for v in exact_fields)

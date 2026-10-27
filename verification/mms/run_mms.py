@@ -205,8 +205,8 @@ def main():
     }
     tests["plate_production_weak_vs_independent_strong"] = {
         "status": "NOT_RUN",
-        "command": "conda run -n fenics-env python verification/mms/strong_weak_check.py",
-        "reason": "Requires legacy DOLFIN; compares production weak mass/damping/internal operators with the independent symbolic strong equations and natural-edge checks.",
+        "command": "conda run -n fenics-env python verification/mms/strong_weak_check.py --mode continuous --formulation nonlinear --resolution 12x24",
+        "reason": "Separate DOLFIN check comparing production weak mass/damping/internal operators with independent symbolic strong equations. The 4x8 quick mesh is too coarse for the strict nonlinear tolerance.",
     }
     tests["plate_residual_jacobian_directional_derivative"] = {
         "status": "NOT_RUN",
@@ -224,9 +224,19 @@ def main():
         }
     else:
         tests["flowvpm_kernel_core_components"] = {
-            "status": "NOT_RUN", "command": "julia --project=/path/to/FLOWUnsteady verification/mms/fluid_components.jl"
+            "status": "NOT_AVAILABLE",
+            "reason": "verification/mms/fluid_components.jl is absent from the current worktree; no stored component metrics were found. Taylor-Green continuum identities do not substitute for a production FLOWVPM test.",
         }
-    summary = {"suite": "VarFlExI verification components", "tests": tests, "full_coupled_continuum_mms": "NOT_CLAIMED"}
+    tests["crm_force_geometry_transfer"] = {
+        "status": "NOT_IMPLEMENTED",
+        "reason": "The synthetic RBF algebra check does not exercise CRM, deformed-interface re-evaluation, endpoint/geometric validity, or independent generalized-load quadrature.",
+    }
+    tests["production_socket_coupling_mms"] = {
+        "status": "NOT_IMPLEMENTED",
+        "reason": "No common manufactured fluid/structure target and compatible source currently traverses the production staggered socket chronology, transfers, circulation solve, and particle lifecycle.",
+    }
+    summary = {"suite": "VarFlExI verification components", "status": "PARTIAL",
+               "tests": tests, "full_coupled_continuum_mms": "NOT_CLAIMED"}
     with open(OUT / "mms_summary.json", "w") as stream:
         json.dump(summary, stream, indent=2)
     with open(OUT / "mms_metrics.csv", "w", newline="") as stream:
@@ -254,12 +264,14 @@ def main():
         "| Nonlinear membrane directional derivative | PASS | Symbolic derivative of the quadratic Green-Lagrange strain matches its variation. |",
         "| Reissner-Mindlin plate source derivation (linear/nonlinear) | PASS | Independent symbolic strong-form source and essential/natural edge checks; no FEniCS solve. |",
         "| RBF resultant and paired virtual work | PASS | Actual local-RBF backend algebra for constant/nonuniform force and nontrivial displacement; moment discrepancy measured, not presumed conserved. |",
-        f"| Installed FLOWVLM/FLOWVPM component checks | {tests['flowvpm_kernel_core_components']['status']} | Kernel limits, direct Gaussian-erf induced velocity, core growth, prescribed-U/zero-J RK3 state update, and freestream registration; no wake integration. |",
+        f"| Installed FLOWVLM/FLOWVPM component checks | {tests['flowvpm_kernel_core_components']['status']} | {tests['flowvpm_kernel_core_components'].get('reason', 'See stored component metrics; component-only scope, no wake integration.')} |",
         "| Scalar generalized-alpha continuous-forcing time refinement | PASS | Six-level oscillator test uses the same coefficient/update helpers as the production integrator; see the dedicated CSV for measured orders. |",
         "| rVPM equation MMS | NOT IMPLEMENTED | No consistent source injection for the installed filtered rVPM evolution. |",
-        "| Discrete FEniCS plate convergence | NOT RUN | Not run by this analytic/component driver; use `fenics-env` commands below. |",
-        "| Production weak form vs independent strong form | NOT RUN | Executable test added; requires legacy DOLFIN. |",
-        "| Production nonlinear residual/Jacobian finite-difference check | NOT RUN | Executable test added; requires legacy DOLFIN. |",
+        "| Discrete FEniCS plate convergence | NOT RUN | Not run by this analytic/component driver. Rerun after the final-time norm correction: legacy final-time columns compared against an FE-interpolated exact field. |",
+        "| Production weak form vs independent strong form | NOT RUN | Separate check; use the 12x24 continuous nonlinear command in the JSON summary. |",
+        "| Production nonlinear residual/Jacobian finite-difference check | NOT RUN | Separate DOLFIN finite-difference test. |",
+        "| CRM and evolving geometry transfer verification | NOT IMPLEMENTED | The current RBF toy check does not cover CRM or moving-interface re-evaluation. |",
+        "| Production socket-path dynamic FSI MMS | NOT IMPLEMENTED | No joint fluid/structure source and interface-consistent exact target exist yet. |",
         "| Full coupled FSI MMS | NOT CLAIMED | No compatible manufactured sources for both solvers and interface conditions. |",
         "", "Measured analytic/component metrics:",
         "", "| Quantity | Value | Observed order |", "|---|---:|---|"])
@@ -286,11 +298,11 @@ def main():
             f"| Scalar oscillator {row['dt_s']:.6g} s: integrated L2 / final error | {row['time_integrated_l2_error']:.6e} / {row['final_time_absolute_error']:.6e} | measured p={row['time_integrated_l2_error_observed_order'] or 'n/a'} / {row['final_time_absolute_error_observed_order'] or 'n/a'} |"
             for row in tests["scalar_generalized_alpha"]["levels"]
         ],
-        "", "The plate source uses configured constitutive constants, Green-Lagrange membrane strain including quadratic in-plane strain, Mindlin shear, rotary inertia, and the implemented mass/initial-stiffness Rayleigh damping law. Continuous forcing evaluates manufactured acceleration, velocity, and displacement at the same force time; the production residual retains its distinct generalized-alpha stages. Discrete plate convergence remains to be measured in `fenics-env`. The original strain implementation omitted the in-plane quadratic term even though its variation and documentation included it; `solid/utils/reisner_mindlin_model.py` now makes the strain and variation consistent.",
-        "", "Outputs: `mms_metrics.csv`, `mms_summary.json`, `flowvpm_component_metrics.csv`, `scalar_generalized_alpha.csv`, `scalar_generalized_alpha.png`, `plate_exact_displacement.png`."
+        "", "The plate source uses configured constitutive constants, Green-Lagrange membrane strain including quadratic in-plane strain, Mindlin shear, rotary inertia, and the implemented mass/initial-stiffness Rayleigh damping law. Continuous forcing evaluates the manufactured fields at the force time while the production residual retains its distinct generalized-alpha stages. Separate structural-only spatial and temporal plate refinements are documented in `verification/mms/README.md`; they do not verify fluid or coupled FSI convergence. The original strain implementation omitted the in-plane quadratic term even though its variation and documentation included it; `solid/utils/reisner_mindlin_model.py` now makes the strain and variation consistent.",
+        "", "Outputs: `mms_metrics.csv`, `mms_summary.json`, `scalar_generalized_alpha.csv`, `scalar_generalized_alpha.png`, `plate_exact_displacement.png`; FLOWVPM component metrics are listed only when a metrics CSV is present."
     ])
     (OUT / "MMS_REPORT.md").write_text("\n".join(lines) + "\n")
-    log(f"MMS SUITE DONE | status=PASS | elapsed={perf_counter()-started:.3f}s "
+    log(f"MMS SUITE DONE | status=PARTIAL | elapsed={perf_counter()-started:.3f}s "
         f"report={OUT / 'MMS_REPORT.md'} summary={OUT / 'mms_summary.json'}")
     print(json.dumps(summary, indent=2), flush=True)
 
