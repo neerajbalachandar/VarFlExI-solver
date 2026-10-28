@@ -109,18 +109,23 @@ def run(config_dir, levels, csv_path, json_path):
             transfer = build_transfer(domain, model, domain.eta_span_comm, mode, coupling)
             _, crm_areas, _ = transfer.crm_backend.build_common_refinement_operator()
             geom_errors = []
-            for phase in (0.37, 1.13):
+            geometry_states = (
+                ("undeformed", 0.0, 0.0),
+                ("deformed_a", 0.01 * domain.root_chord, 0.37),
+                ("deformed_b", 0.01 * domain.root_chord, 1.13),
+            )
+            for _state_name, amplitude, phase in geometry_states:
                 q = set_moving_state(
                     model, domain.root_chord, domain.span,
-                    0.01 * domain.root_chord, phase,
+                    amplitude, phase,
                 )
                 u_le, u_te, _, _ = transfer.apply_geometry_transfer(q)
                 le_exact = exact_displacement(
-                    transfer.le_targets, 0.01 * domain.root_chord,
+                    transfer.le_targets, amplitude,
                     domain.root_chord, domain.span, phase,
                 )
                 te_exact = exact_displacement(
-                    transfer.te_targets, 0.01 * domain.root_chord,
+                    transfer.te_targets, amplitude,
                     domain.root_chord, domain.span, phase,
                 )
                 geom_errors.append(np.concatenate((u_le - le_exact, u_te - te_exact)))
@@ -188,6 +193,7 @@ def run(config_dir, levels, csv_path, json_path):
                 rows.append({
                     "nx": nx, "ny": ny, "stations": nstations, "backend": mode,
                     "force_case": force_name,
+                    "geometry_states": ";".join(name for name, _, _ in geometry_states),
                     "geometry_rms_error_m": float(np.sqrt(np.mean(np.concatenate(geom_errors) ** 2))),
                     "geometry_max_error_m": float(np.max(np.linalg.norm(np.concatenate(geom_errors).reshape(-1, 3), axis=1))),
                     "force_resultant_relative_error": float(

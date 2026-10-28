@@ -26,6 +26,17 @@ class PlateMMS:
     load_components: dict
     kinematics: dict
     boundary_checks: dict
+    target_derivatives: dict
+
+    @property
+    def velocities(self):
+        """Analytical ``(u_t, w_t, theta_t)`` target fields."""
+        return self.target_derivatives["q_t"]
+
+    @property
+    def accelerations(self):
+        """Analytical ``(u_tt, w_tt, theta_tt)`` target fields."""
+        return self.target_derivatives["q_tt"]
 
 
 def _div_rows(tensor, x, y):
@@ -60,6 +71,21 @@ def make_plate_mms(config, nonlinear, include_quadratic_inplane=True, operation_
             sp.Float("1e-3") * bump * sp.cos(omega * t),
             -sp.Float("1e-3") * bump * sp.sin(omega * t),
         ])
+        # Keep the analytical derivatives beside the target so the structural
+        # solver and independent checks share one definition and time level.
+        q = (u, w, theta)
+        target_derivatives = {
+            "q": q,
+            "q_t": tuple(value.diff(t) for value in q),
+            "q_tt": tuple(value.diff(t, 2) for value in q),
+            "q_x": tuple(value.diff(x) for value in q),
+            "q_y": tuple(value.diff(y) for value in q),
+            "q_xx": tuple(value.diff(x, 2) for value in q),
+            "q_xy": tuple(value.diff(x, y) for value in q),
+            "q_yy": tuple(value.diff(y, 2) for value in q),
+            "q_xt": tuple(value.diff(x).diff(t) for value in q),
+            "q_yt": tuple(value.diff(y).diff(t) for value in q),
+        }
 
     with timed("sympy_membrane_kinematics_and_stress"):
         grad_u = u.jacobian((x, y))
@@ -160,5 +186,5 @@ def make_plate_mms(config, nonlinear, include_quadratic_inplane=True, operation_
         x, y, t, (u, w, theta), (f_u, f_w, f_theta), load_components,
         {"membrane_strain": eps, "curvature": curvature, "shear_strain": shear,
          "membrane_resultant": N, "bending_moment": M, "shear_resultant": Q},
-        checks,
+        checks, target_derivatives,
     )

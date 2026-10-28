@@ -15,8 +15,10 @@ import json
 import math
 import os
 import sys
+import traceback
 from pathlib import Path
 from time import perf_counter
+from datetime import datetime, timezone
 
 import matplotlib
 matplotlib.use("Agg")
@@ -25,7 +27,6 @@ import numpy as np
 import sympy as sp
 import yaml
 
-from fluid import taylor_green_source
 from plate import make_plate_mms
 from scalar_generalized_alpha import run_scalar_test
 from progress import log, operation
@@ -34,7 +35,7 @@ ROOT = Path(__file__).resolve().parents[2]
 OUT = Path(__file__).resolve().parent / "results"
 
 
-def verify_taylor_green():
+def verify_taylor_green(taylor_green_source):
     data = taylor_green_source()
     residuals = [data[k] for k in ("momentum_source", "vorticity_source")]
     maximum = max(float(abs(sp.N(v.subs({data["coords"][i]: q for i, q in enumerate((0.31, 0.47, 0.0, 0.23))})))) for expr in residuals for v in expr)
@@ -68,6 +69,47 @@ def verify_nonlinear_membrane_variation():
     if discrepancy != sp.zeros(2):
         raise AssertionError(f"Nonlinear membrane variation mismatch: {discrepancy}")
     return {"status": "PASS", "directional_derivative_max_abs": 0.0}
+
+
+def verify_target_derivatives(config, heartbeat_s=10.0):
+    """Compare analytical target derivatives with centered finite differences."""
+    mms = make_plate_mms(config, nonlinear=True,
+                         include_quadratic_inplane=config.get("include_quadratic_inplane_strain", True),
+                         operation_factory=lambda stage, **kw: operation(
+                             stage, heartbeat_s, detail="target-derivative-check"))
+    point = {mms.x: config["root_chord"] * 0.41,
+             mms.y: config["span"] * 0.57, mms.t: 0.37}
+    h_t = 2.0e-4
+    h_x = min(config["root_chord"], config["span"]) * 2.0e-4
+    h_y = h_x
+
+    def values(expressions, substitutions):
+        items = []
+        for expr in expressions:
+            items.extend(list(expr) if isinstance(expr, sp.MatrixBase) else [expr])
+        return np.asarray([float(sp.N(expr.subs(substitutions))) for expr in items])
+
+    q = mms.target_derivatives["q"]
+    errors = {}
+    for key, axis, step, order in (("q_t", mms.t, h_t, 1),
+                                    ("q_tt", mms.t, h_t, 2),
+                                    ("q_x", mms.x, h_x, 1),
+                                    ("q_y", mms.y, h_y, 1)):
+        plus, minus = dict(point), dict(point)
+        plus[axis] += step
+        minus[axis] -= step
+        f_plus, f_zero, f_minus = values(q, plus), values(q, point), values(q, minus)
+        fd = ((f_plus - f_minus) / (2.0 * step) if order == 1 else
+              (f_plus - 2.0 * f_zero + f_minus) / step**2)
+        analytic = values(mms.target_derivatives[key], point)
+        errors[key] = float(np.linalg.norm(fd - analytic) / max(np.linalg.norm(analytic), 1.0e-30))
+    limits = {"q_t": 2.0e-7, "q_tt": 2.0e-6, "q_x": 1.0e-6, "q_y": 1.0e-6}
+    failures = {key: value for key, value in errors.items() if value > limits[key]}
+    if failures:
+        raise AssertionError(f"Analytical target derivative finite-difference check failed: {failures}")
+    return {"status": "PASS", "relative_errors": errors,
+            "finite_difference_steps": {"time_s": h_t, "space_m": h_x},
+            "scope": "centered finite-difference check of analytical target derivatives"}
 
 
 def verify_plate_symbolics(config, heartbeat_s=10.0):
@@ -174,34 +216,75 @@ def verify_rbf_component(heartbeat_s=10.0):
 
 
 def main():
+    global OUT
     parser = argparse.ArgumentParser()
     parser.add_argument("--config-dir", default=str(ROOT / "config"))
     parser.add_argument("--heartbeat-seconds", type=float, default=10.0)
+    parser.add_argument("--output-dir", default=str(OUT),
+                        help="write all artifacts here (use a fresh directory to preserve prior results)")
     args = parser.parse_args()
+    OUT = Path(args.output_dir).resolve()
     started = perf_counter()
-    log(f"MMS SUITE START | argv={sys.argv!r} python={sys.executable} config={args.config_dir} output={OUT}")
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    log(f"MMS SUITE START | run_id={run_id} argv={sys.argv!r} python={sys.executable} config={args.config_dir} output={OUT}")
     OUT.mkdir(parents=True, exist_ok=True)
     with operation("load_solid_configuration", args.heartbeat_seconds):
         with open(Path(args.config_dir) / "solid_params.yaml") as stream:
             solid_cfg = yaml.safe_load(stream)
     tests = {}
+    fluid_module = ROOT / "verification" / "mms" / "fluid.py"
+    taylor_green = None
+    if fluid_module.is_file():
+        spec = importlib.util.spec_from_file_location("verification_fluid_mms", fluid_module)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        taylor_green = module.taylor_green_source
     stages = (
-        ("taylor_green_analytic_identity", lambda: verify_taylor_green()),
         ("nonlinear_membrane_energy_variation", verify_nonlinear_membrane_variation),
+        ("plate_target_derivatives", lambda: verify_target_derivatives(solid_cfg, args.heartbeat_seconds)),
         ("plate_symbolic_manufactured_loads", lambda: verify_plate_symbolics(solid_cfg, args.heartbeat_seconds)),
         ("rbf_weighted_resultant_component", lambda: verify_rbf_component(args.heartbeat_seconds)),
         ("scalar_generalized_alpha", lambda: run_scalar_test(OUT)),
     )
+    if taylor_green is not None:
+        stages = (("taylor_green_analytic_identity", lambda: verify_taylor_green(taylor_green)),) + stages
+    else:
+        tests["taylor_green_analytic_identity"] = {
+            "status": "NOT_AVAILABLE",
+            "reason": "verification/mms/fluid.py is absent; its pre-existing worktree deletion was preserved.",
+        }
     for name, check in stages:
-        with operation(f"MMS_{name}", args.heartbeat_seconds):
-            tests[name] = check()
+        try:
+            with operation(f"MMS_{name}", args.heartbeat_seconds):
+                tests[name] = check()
+        except Exception as exc:
+            tests[name] = {
+                "status": "FAIL",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            }
+            failure_summary = {
+                "suite": "VarFlExI verification components",
+                "status": "FAIL",
+                "run_id": run_id,
+                "created_utc": datetime.now(timezone.utc).isoformat(),
+                "python": sys.version,
+                "executable": sys.executable,
+                "verification_level": "analytical identities and Python component checks",
+                "tests": tests,
+                "remaining_stages": [pending for pending, _ in stages if pending not in tests],
+                "full_coupled_continuum_mms": "NOT_CLAIMED",
+            }
+            (OUT / "mms_summary.json").write_text(json.dumps(failure_summary, indent=2))
+            raise
     tests["full_rvpm_equation_mms"] = {
         "status": "NOT_IMPLEMENTED",
-        "reason": "FLOWVPM's production particle integrator has no general manufactured vorticity-source injection; adding a classical Navier-Stokes source would not match its filtered rVPM equations.",
+        "reason": "Only a fixed-population position-equation stage source is implemented. Gamma, core-width evolution, target shedding/births, removal events, and target circulation/forces do not yet have manufactured sources.",
     }
     tests["fenics_plate_discrete_convergence"] = {
         "status": "NOT_RUN",
-        "reason": "Not executed by this run_mms invocation; use the documented fenics-env commands for DOLFIN-dependent checks.",
+        "reason": "Not executed by this analytic/component invocation. A corrected five-level structural-only spatial run is documented in verification/mms/readme.md; no coupled FSI convergence was run.",
     }
     tests["plate_production_weak_vs_independent_strong"] = {
         "status": "NOT_RUN",
@@ -213,38 +296,42 @@ def main():
         "command": "conda run -n fenics-env python verification/mms/jacobian_check.py",
         "reason": "Requires legacy DOLFIN; finite-differences the complete production residual against its UFL tangent.",
     }
-    fluid_component_csv = OUT / "flowvpm_component_metrics.csv"
-    if fluid_component_csv.is_file():
-        with open(fluid_component_csv, newline="") as stream:
-            fluid_component_rows = list(csv.DictReader(stream))
-        tests["flowvpm_kernel_core_components"] = {
-            "status": "PASS" if fluid_component_rows and all(row["status"] == "PASS" for row in fluid_component_rows) else "FAIL",
-            "metrics_csv": str(fluid_component_csv),
-            "checks": fluid_component_rows,
-        }
-    else:
-        tests["flowvpm_kernel_core_components"] = {
-            "status": "NOT_AVAILABLE",
-            "reason": "verification/mms/fluid_components.jl is absent from the current worktree; no stored component metrics were found. Taylor-Green continuum identities do not substitute for a production FLOWVPM test.",
-        }
+    tests["rVPM_particle_position_stage_component"] = {
+        "status": "NOT_RUN",
+        "reason": "Not run by this Python suite; it exercises the native RK3 stage adapter on a fixed one-particle field.",
+        "command": "julia --project=.. verification/mms/particle_position_stage_check.jl",
+    }
+    tests["flowvpm_kernel_core_components"] = {
+        "status": "NOT_RUN",
+        "reason": "This Python analytic/component invocation does not execute the Julia FLOWVPM component suite. Existing CSV files are not consumed as evidence for this run.",
+        "command": "julia --project=PATH_TO_FLOWUNSTEADY verification/mms/fluid_components.jl",
+    }
     tests["crm_force_geometry_transfer"] = {
-        "status": "NOT_IMPLEMENTED",
-        "reason": "The synthetic RBF algebra check does not exercise CRM, deformed-interface re-evaluation, endpoint/geometric validity, or independent generalized-load quadrature.",
+        "status": "COMPONENT_ONLY",
+        "command": "conda run -n fenics-env python verification/mms/transfer_moving_interface.py --config-dir config --levels 8x16,12x24",
+        "reason": "The separate runner exercises production CRM/RBF code and checks resultant, paired work, moment, and geometry interpolation for limited fields. It does not rebuild operators on moving topology, sweep RBF support/conditioning, or verify socket-coupled transfer.",
     }
     tests["production_socket_coupling_mms"] = {
         "status": "NOT_IMPLEMENTED",
         "reason": "No common manufactured fluid/structure target and compatible source currently traverses the production staggered socket chronology, transfers, circulation solve, and particle lifecycle.",
     }
     summary = {"suite": "VarFlExI verification components", "status": "PARTIAL",
+               "run_id": run_id, "created_utc": datetime.now(timezone.utc).isoformat(),
+               "python": sys.version, "executable": sys.executable,
+               "git_commit": None, "working_tree": "not captured by this Python-only runner",
+               "verification_level": "analytical identities and Python component checks",
                "tests": tests, "full_coupled_continuum_mms": "NOT_CLAIMED"}
     with open(OUT / "mms_summary.json", "w") as stream:
         json.dump(summary, stream, indent=2)
     with open(OUT / "mms_metrics.csv", "w", newline="") as stream:
         writer = csv.writer(stream)
         writer.writerow(("test", "status", "metric", "value"))
-        writer.writerow(("taylor_green_analytic_identity", "PASS", "source_max_abs", tests["taylor_green_analytic_identity"]["momentum_source_max_abs"]))
-        writer.writerow(("taylor_green_analytic_identity", "PASS", "curl_definition_max_abs", tests["taylor_green_analytic_identity"]["curl_definition_max_abs"]))
+        if tests["taylor_green_analytic_identity"]["status"] == "PASS":
+            writer.writerow(("taylor_green_analytic_identity", "PASS", "source_max_abs", tests["taylor_green_analytic_identity"]["momentum_source_max_abs"]))
+            writer.writerow(("taylor_green_analytic_identity", "PASS", "curl_definition_max_abs", tests["taylor_green_analytic_identity"]["curl_definition_max_abs"]))
         writer.writerow(("nonlinear_membrane_energy_variation", "PASS", "directional_derivative_discrepancy", 0.0))
+        for key, value in tests["plate_target_derivatives"]["relative_errors"].items():
+            writer.writerow(("plate_target_derivatives", "PASS", key + "_relative_error", value))
         writer.writerow(("plate_linear_symbolic", "PASS", "source_sample_max_abs", tests["plate_symbolic_manufactured_loads"]["linear"]["source_sample_max_abs"]))
         writer.writerow(("plate_nonlinear_symbolic", "PASS", "source_sample_max_abs", tests["plate_symbolic_manufactured_loads"]["nonlinear"]["source_sample_max_abs"]))
         writer.writerow(("rbf_paired_virtual_work_component", "PASS", "relative_error", tests["rbf_weighted_resultant_component"]["paired_virtual_work_relative_error"]))
@@ -260,28 +347,39 @@ def main():
     lines = ["# MMS and Component Verification", "", "Generated by `python3 verification/mms/run_mms.py`.", "",
              "| Test | Status | Scope |", "|---|---|---|"]
     lines.extend([
-        "| Taylor-Green analytic identities | PASS | Exact incompressible Navier-Stokes and vorticity residual identities; not an rVPM solve. |",
+        f"| Taylor-Green analytic identities | {tests['taylor_green_analytic_identity']['status']} | {tests['taylor_green_analytic_identity'].get('reason', 'Exact incompressible Navier-Stokes and vorticity residual identities; not an rVPM solve.')} |",
         "| Nonlinear membrane directional derivative | PASS | Symbolic derivative of the quadratic Green-Lagrange strain matches its variation. |",
+        f"| Plate target derivatives | {tests['plate_target_derivatives']['status']} | Centered finite-difference checks of analytic time and spatial derivatives. |",
         "| Reissner-Mindlin plate source derivation (linear/nonlinear) | PASS | Independent symbolic strong-form source and essential/natural edge checks; no FEniCS solve. |",
         "| RBF resultant and paired virtual work | PASS | Actual local-RBF backend algebra for constant/nonuniform force and nontrivial displacement; moment discrepancy measured, not presumed conserved. |",
         f"| Installed FLOWVLM/FLOWVPM component checks | {tests['flowvpm_kernel_core_components']['status']} | {tests['flowvpm_kernel_core_components'].get('reason', 'See stored component metrics; component-only scope, no wake integration.')} |",
         "| Scalar generalized-alpha continuous-forcing time refinement | PASS | Six-level oscillator test uses the same coefficient/update helpers as the production integrator; see the dedicated CSV for measured orders. |",
-        "| rVPM equation MMS | NOT IMPLEMENTED | No consistent source injection for the installed filtered rVPM evolution. |",
-        "| Discrete FEniCS plate convergence | NOT RUN | Not run by this analytic/component driver. Rerun after the final-time norm correction: legacy final-time columns compared against an FE-interpolated exact field. |",
+        f"| rVPM position-stage component | {tests['rVPM_particle_position_stage_component']['status']} | {tests['rVPM_particle_position_stage_component']['reason']} |",
+        "| Full rVPM equation MMS | NOT IMPLEMENTED | Only a fixed-population position source is available; circulation/core and lifecycle sources remain absent. |",
+        f"| Discrete FEniCS plate convergence | {tests['fenics_plate_discrete_convergence']['status']} | {tests['fenics_plate_discrete_convergence']['reason']} |",
         "| Production weak form vs independent strong form | NOT RUN | Separate check; use the 12x24 continuous nonlinear command in the JSON summary. |",
         "| Production nonlinear residual/Jacobian finite-difference check | NOT RUN | Separate DOLFIN finite-difference test. |",
-        "| CRM and evolving geometry transfer verification | NOT IMPLEMENTED | The current RBF toy check does not cover CRM or moving-interface re-evaluation. |",
+        f"| CRM/RBF moving-interface transfer | {tests['crm_force_geometry_transfer']['status']} | {tests['crm_force_geometry_transfer']['reason']} |",
         "| Production socket-path dynamic FSI MMS | NOT IMPLEMENTED | No joint fluid/structure source and interface-consistent exact target exist yet. |",
         "| Full coupled FSI MMS | NOT CLAIMED | No compatible manufactured sources for both solvers and interface conditions. |",
         "", "Measured analytic/component metrics:",
         "", "| Quantity | Value | Observed order |", "|---|---:|---|"])
-    lines.extend([
+    if tests["taylor_green_analytic_identity"]["status"] == "PASS":
+        lines.extend([
         f"| Taylor-Green momentum residual max | {tests['taylor_green_analytic_identity']['momentum_source_max_abs']:.3e} | N/A, identity check |",
         f"| Taylor-Green curl-definition residual max | {tests['taylor_green_analytic_identity']['curl_definition_max_abs']:.3e} | N/A, identity check |",
         f"| Taylor-Green vorticity residual max | {tests['taylor_green_analytic_identity']['vorticity_source_max_abs']:.3e} | N/A, identity check |",
+        ])
+    else:
+        lines.append("| Taylor-Green analytic residuals | NOT AVAILABLE | `verification/mms/fluid.py` is absent. |")
+    lines.extend([
         f"| Linear plate source sample max | {tests['plate_symbolic_manufactured_loads']['linear']['source_sample_max_abs']:.6e} | N/A, no discrete refinement |",
         f"| Nonlinear plate source sample max | {tests['plate_symbolic_manufactured_loads']['nonlinear']['source_sample_max_abs']:.6e} | N/A, no discrete refinement |",
         f"| RBF paired virtual-work relative discrepancy | {tests['rbf_weighted_resultant_component']['paired_virtual_work_relative_error']:.3e} | N/A, algebraic identity |",
+        *[
+            f"| Target {key} relative derivative discrepancy | {value:.3e} | centered finite difference |"
+            for key, value in tests["plate_target_derivatives"]["relative_errors"].items()
+        ],
         *[
             f"| RBF resultant case {i+1} relative discrepancy | {case['resultant_relative_error']:.3e} | N/A, algebraic identity |"
             for i, case in enumerate(tests["rbf_weighted_resultant_component"]["force_cases"])
@@ -298,7 +396,7 @@ def main():
             f"| Scalar oscillator {row['dt_s']:.6g} s: integrated L2 / final error | {row['time_integrated_l2_error']:.6e} / {row['final_time_absolute_error']:.6e} | measured p={row['time_integrated_l2_error_observed_order'] or 'n/a'} / {row['final_time_absolute_error_observed_order'] or 'n/a'} |"
             for row in tests["scalar_generalized_alpha"]["levels"]
         ],
-        "", "The plate source uses configured constitutive constants, Green-Lagrange membrane strain including quadratic in-plane strain, Mindlin shear, rotary inertia, and the implemented mass/initial-stiffness Rayleigh damping law. Continuous forcing evaluates the manufactured fields at the force time while the production residual retains its distinct generalized-alpha stages. Separate structural-only spatial and temporal plate refinements are documented in `verification/mms/README.md`; they do not verify fluid or coupled FSI convergence. The original strain implementation omitted the in-plane quadratic term even though its variation and documentation included it; `solid/utils/reisner_mindlin_model.py` now makes the strain and variation consistent.",
+        "", "The plate source uses configured constitutive constants, Green-Lagrange membrane strain including quadratic in-plane strain, Mindlin shear, rotary inertia, and the implemented mass/initial-stiffness Rayleigh damping law. Continuous forcing evaluates the manufactured fields at the force time while the production residual retains its distinct generalized-alpha stages. Separate structural-only spatial and temporal plate refinements are documented in `verification/mms/readme.md`; they do not verify fluid or coupled FSI convergence. The original strain implementation omitted the in-plane quadratic term even though its variation and documentation included it; `solid/utils/reisner_mindlin_model.py` now makes the strain and variation consistent.",
         "", "Outputs: `mms_metrics.csv`, `mms_summary.json`, `scalar_generalized_alpha.csv`, `scalar_generalized_alpha.png`, `plate_exact_displacement.png`; FLOWVPM component metrics are listed only when a metrics CSV is present."
     ])
     (OUT / "MMS_REPORT.md").write_text("\n".join(lines) + "\n")

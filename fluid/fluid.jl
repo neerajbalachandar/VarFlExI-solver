@@ -31,6 +31,7 @@ include("src/geom_update.jl")
 include("src/geom_receiver.jl")
 include("src/wing_geom.jl")
 include("src/runtime_callback.jl")
+include("src/mms_rk3.jl")
 
 args = parse_cli()
 

@@ -77,6 +77,32 @@ wing = make_cantilever_template(
 )
 wing_ref = deepcopy(wing)
 
+# Optional verification hook: add a constant manufactured velocity source to
+# the particle position equation at each native rVPM RK3 stage. Normal runs
+# retain FLOWVPM.rungekutta3 directly and do not enter this branch.
+mms_position_source_text = strip(get(ENV, "VARFLEXI_MMS_POSITION_SOURCE", ""))
+mms_position_source_enabled = !isempty(mms_position_source_text)
+mms_rk3_stage_trace = NamedTuple[]
+if !mms_position_source_enabled
+    vpm_integration = vpm.rungekutta3
+else
+    lowercase(strip(solver_cfg.vpm_sfs)) in ("none", "off", "false") || error(
+        "The particle-position MMS component requires vpm_sfs=none so its position source cannot enter SFS strength evolution"
+    )
+    mms_position_source = parse.(Float64, split(mms_position_source_text, ','))
+    length(mms_position_source) == 3 || error(
+        "VARFLEXI_MMS_POSITION_SOURCE must contain three comma-separated values in m/s"
+    )
+    all(isfinite, mms_position_source) || error("MMS position source must be finite")
+    mms_source! = (_particle, _stage_time) -> mms_position_source
+    vpm_integration = (pfield, step_dt; relax=false, custom_UJ=nothing) ->
+        rungekutta3_with_position_source(
+            pfield, step_dt, mms_source!; relax=relax, custom_UJ=custom_UJ,
+            stage_trace=mms_rk3_stage_trace
+        )
+    println("Opt-in particle position MMS source active: $(mms_position_source) m/s")
+end
+
 polar_path = isempty(solver_cfg.section_polar_path) ? nothing : solver_cfg.section_polar_path
 parasitic_args = polar_path === nothing ? () : (read_path=polar_path,)
 aerodynamic_force_calculator = uns.generate_calc_aerodynamicforce(

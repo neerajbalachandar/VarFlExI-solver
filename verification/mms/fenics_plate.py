@@ -121,8 +121,8 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=1
     assigner = FunctionAssigner(model.V, spaces)
     exact_u, exact_w, exact_theta = mms.fields
     exact_fields = (exact_u, exact_w, exact_theta)
-    exact_velocity = tuple(value.diff(mms.t) for value in exact_fields)
-    exact_acceleration = tuple(value.diff(mms.t, 2) for value in exact_fields)
+    exact_velocity = mms.velocities
+    exact_acceleration = mms.accelerations
     # The independent symbolic strong source is the manufactured forcing.
     # Only displacement/velocity/acceleration states are interpolated; the
     # production weak operators are checked independently by strong_weak_check.
@@ -156,8 +156,8 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=1
 
     model.q_old.assign(make_mixed_function(model, exact_fields, 0, spaces, assigner))
     model.q.assign(model.q_old)
-    model.v_old.assign(make_mixed_function(model, tuple(v.diff(mms.t) for v in exact_fields), 0, spaces, assigner))
-    model.a_old.assign(make_mixed_function(model, tuple(v.diff(mms.t, 2) for v in exact_fields), 0, spaces, assigner))
+    model.v_old.assign(make_mixed_function(model, exact_velocity, 0, spaces, assigner))
+    model.a_old.assign(make_mixed_function(model, exact_acceleration, 0, spaces, assigner))
     q0 = split(model.q_old)
     exact_error_fields = (vector_expr(exact_u, 0.0, degree=8), scalar_expr(exact_w, 0.0, degree=8),
                            vector_expr(exact_theta, 0.0))

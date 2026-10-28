@@ -14,7 +14,7 @@ uns.run_simulation(simulation, nsteps;
     vpm_kernel=vpm.gaussianerf,
     vpm_UJ=vpm.UJ_fmm,
     vpm_SFS=vpm_sfs,
-    vpm_integration=vpm.rungekutta3,
+    vpm_integration=vpm_integration,
     vpm_transposed=true,
     vpm_relaxation=vpm.pedrizzetti,
     vpm_surface=true,
@@ -35,6 +35,17 @@ uns.run_simulation(simulation, nsteps;
     nsteps_save=nsteps_save,
     save_horseshoes=save_horseshoes
 )
+
+if mms_position_source_enabled
+    mms_stage_path = joinpath(save_path, run_name * "_mms_rk3_stage_history.csv")
+    open(mms_stage_path, "w") do io
+        println(io, "stage,time_s,particle_count,position_source_l2_norm_m_per_s")
+        for row in mms_rk3_stage_trace
+            println(io, "$(row.stage),$(row.time),$(row.particle_count),$(row.source_l2_norm)")
+        end
+    end
+    println("MMS RK3 stage history: $mms_stage_path")
+end
 
 open(diag_path, "w") do io
     println(

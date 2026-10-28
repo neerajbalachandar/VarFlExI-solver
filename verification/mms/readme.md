@@ -1,5 +1,97 @@
 # Coupled MMS Target: Construction and Current Boundary
 
+## Verification Guide and Status
+
+**Overall status: PARTIAL.** The repository has a structural plate MMS,
+symbolic identities, a production weak/strong structural check, a discrete
+FLOWVLM circulation component reference, and production transfer diagnostics.
+It does not yet have a consistent rVPM manufactured source for the complete
+particle state, a time-dependent circulation/force target, or a socket-coupled
+dynamic FSI MMS. No component result is a full-FSI pass.
+
+### Run Commands
+
+Run from the repository root. The legacy DOLFIN checks use the `fenics-env`
+environment; the standalone fluid study needs the Julia project used by
+`run.sh`.
+
+| Command | Purpose and principal outputs |
+|---|---|
+| `conda run -n fenics-env python verification/mms/run_mms.py --output-dir /tmp/mms-run` | Symbolic plate source/edge checks, target-derivative finite-difference checks, nonlinear membrane variation, scalar generalized-alpha study, and the RBF algebra component. Writes run-scoped JSON/CSV/report/plots under the selected directory; failed checks preserve a traceback in `mms_summary.json` and return nonzero. Existing FLOWVPM CSVs are never counted as results from this Python invocation. |
+| `conda run -n fenics-env python verification/mms/strong_weak_check.py --mode continuous --formulation nonlinear --resolution 12x24` | Independent symbolic strong-form versus production UFL weak-form consistency; writes its selected CSV. This is not a transient solve. |
+| `conda run -n fenics-env python verification/mms/jacobian_check.py` | Finite-difference directional check of the nonlinear structural residual/Jacobian. |
+| `conda run -n fenics-env python verification/mms/fenics_plate.py --production-formulation --nx 12 --ny 16 --dt 0.001 --duration 0.01 --output /tmp/plate.csv` | One production Reissner-Mindlin transient structural-only MMS case; output includes continuous-target, FE projection, derived-field, and Newton metrics. |
+| `conda run -n fenics-env python verification/mms/refinement.py --study spatial --execute --formulation nonlinear --output-dir /tmp/plate-spatial` | Five-level structural spatial refinement. Use `--study temporal` for six time steps on a fixed `48x128` mesh. The temporal series is expensive; do not assume it diagnoses the previously observed error floor without same-mesh time-reference checks. |
+| `conda run -n fenics-env python verification/mms/transfer_moving_interface.py --config-dir config --levels 8x16,12x24 --csv /tmp/transfer.csv --json /tmp/transfer.json` | Calls production CRM/RBF transfer methods at undeformed and two deformed states on each mesh, with constant and varying forces; emits component-only geometry, resultant, moment, and work metrics. |
+| `conda run -n fenics-env bash -lc 'LD_LIBRARY_PATH="$CONDA_PREFIX/lib" julia --project=.. verification/mms/circulation_reference_check.jl'` | Rebuilds the FLOWVLM horseshoe influence matrix and no-penetration RHS independently, compares the circulation with the installed solve, and checks a manufactured discrete circulation vector. Shares the installed vortex kernel; static geometry only. |
+| `julia --project=.. verification/mms/particle_position_stage_check.jl` | Fixed-population component check of the native rVPM RK3 position update with a constant source and a zero-source regression. This does not verify circulation/core evolution or native wake lifecycle. |
+| `julia --project=PATH_TO_FLOWUNSTEADY verification/mms/run_refinement.jl --study particles --execute` | Standalone FLOWUnsteady/rVPM sensitivity run, not particle MMS and not coupled FSI. Each case records config and particle-count observations under its results folder. `analyze.py` compares histories against a numerical reference, not an exact solution. |
+
+The recent corrected structural spatial run used nonlinear production settings,
+levels `6x8`, `12x16`, `24x32`, `48x64`, `96x128`, `dt=6.25e-5 s`, and final
+time `0.01 s`; outputs were isolated at `/tmp/varflexi-spatial-corrected`.
+Continuous-target pairwise orders coarse-to-fine were `2.94, 3.11, 3.12, 3.05`
+for in-plane displacement, `2.97, 3.67, 3.83, 3.74` for transverse
+displacement, `2.90, 3.63, 3.78, 3.68` for rotation, and `2.99, 3.66, 3.81,
+3.69` for time-integrated transverse displacement. This result is
+structural-only. The old temporal
+time-integrated error floor near `0.289` has not been resolved by a same-mesh
+fine-step comparison; no temporal plate rate is claimed. To preserve existing
+outputs, send new refinement runs to a fresh `--output-dir`.
+
+The project-owned `fluid/src/mms_rk3.jl` wraps the installed RK3 routine and
+adds an opt-in source to the particle-position RHS at the native stages
+`t`, `t+dt/3`, and `t+3dt/4`. The production solver enables this component hook
+only when `VARFLEXI_MMS_POSITION_SOURCE="sx,sy,sz"` is set; values are constant
+source velocities in m/s. The default path passes `vpm.rungekutta3` unchanged.
+Enabled runs write `*_mms_rk3_stage_history.csv`; the source hook requires
+`vpm_sfs=none` so it cannot leak into subfilter-scale strength evolution. The
+fixed-population regression reports zero position error for constant velocity
+forcing and zero complete-particle-state difference against native RK3 when
+the source is zero. This hook manufactures only particle position evolution; it does not supply compatible sources for
+circulation, core width, shedding, particle birth/removal, force, or structure.
+It is not a coupled or complete rVPM MMS.
+
+`PlateMMS.target_derivatives` is the canonical symbolic derivative collection
+for the structural target. `PlateMMS.velocities` and `.accelerations` are used
+directly by the structural MMS solver, and the Python component runner checks
+them (plus first spatial derivatives) against centered finite differences.
+
+The current Julia solver uses FLOWVLM's discrete horseshoe-vortex
+no-penetration solve coupled to FLOWVPM/rVPM, not an actuator-line model. The
+installed RK3 stages advance particle positions and circulation; core
+spreading is a separate staged update and can remap particle strengths.
+Native shedding, birth, core evolution, and removal are event-bearing
+operations. There is no verification source hook at those stages and no
+immutable particle event ledger matched against manufactured lifetimes.
+Therefore neither the Taylor-Green continuum identity (also unavailable when
+`fluid.py` is absent) nor the standalone particle sensitivity driver verifies
+the production particle equations.
+
+The installed force callback retains the previous VLM system and adds the
+separately exposed unsteady force vector once. This force-path behavior is
+production implementation context, not an independent force verification.
+`circulation_reference_check.jl` independently assembles the discrete
+horseshoe matrix and RHS and checks a manufactured circulation vector, while
+reusing the installed production vortex kernel. Its 12-panel static check
+produced relative circulation difference `2.77e-17`, production
+no-penetration residual `2.26e-16`, and manufactured-target error `1.71e-16`.
+It does not construct a moving target geometry, include wake induction, or
+calculate a target aerodynamic force. No independent time-dependent target
+circulation/force sequence or quadrature source for a coupled structural MMS
+is currently implemented.
+Similarly, `transfer_moving_interface.py` does not re-mesh/rebuild the
+operators under moving topology and does not sweep RBF support or conditioning;
+its conservation metrics cannot substitute for those accuracy tests.
+
+Every result must be interpreted by its scope: `PASS` applies only to the
+named check; `NOT_AVAILABLE`, `NOT_RUN`, `NOT_IMPLEMENTED`, and
+`INCONCLUSIVE` are not passes. The full socket path, variable-population
+event-aware coupled sources, coupled plots, and coupled spatial/temporal
+refinement remain outstanding. Keep the overall status **PARTIAL** until
+those production-path runs produce a consistent target, event/error records,
+and defensible multi-level trends.
+
 ## Purpose
 
 This note defines what a single manufactured trajectory must contain for the
