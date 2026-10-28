@@ -40,5 +40,15 @@ alpha_f: 0.2
 newton_atol: 1.0e-8
 newton_rtol: 1.0e-6
 newton_maxiter: 20
+# Exact Newton with Armijo backtracking is the default.  The alternative
+# regularizes the Newton tangent as J + lambda*K_ref after rejected trials.
+nonlinear_solver: newton_linesearch
+newton_max_backtracks: 12
+newton_armijo_c1: 1.0e-4
+regularized_newton_initial_lambda: 1.0e-6
+regularized_newton_lambda_growth: 10.0
+regularized_newton_lambda_decay: 0.25
+regularized_newton_max_attempts: 8
 
+# Number of fixed-load continuation stages, not Newton iterations.
 force_ramp_iters: 1

@@ -139,7 +139,20 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=1
     newton_rtol = float(cfg.get("newton_rtol", 1.0e-6))
     newton_maxit = int(cfg.get("newton_maxiter", cfg.get("newton_maxit", 20)))
     newton_max_backtracks = int(cfg.get("newton_max_backtracks", 12))
+    nonlinear_solver = str(cfg.get("nonlinear_solver", "newton_linesearch")).strip().lower()
+    if nonlinear_solver == "newton_line_search":
+        nonlinear_solver = "newton_linesearch"
+    if nonlinear_solver not in ("newton_linesearch", "regularized_newton"):
+        raise ValueError("nonlinear_solver must be 'newton_linesearch' or 'regularized_newton'")
+    newton_armijo_c1 = float(cfg.get("newton_armijo_c1", 1.0e-4))
+    regularized_newton_initial_lambda = float(cfg.get("regularized_newton_initial_lambda", 1.0e-6))
+    regularized_newton_lambda_growth = float(cfg.get("regularized_newton_lambda_growth", 10.0))
+    regularized_newton_lambda_decay = float(cfg.get("regularized_newton_lambda_decay", 0.25))
+    regularized_newton_max_attempts = int(cfg.get("regularized_newton_max_attempts", 8))
     force_ramp_iters = int(cfg.get("force_ramp_iters", 1))
+    K_ref = assemble(model.stiffness_form(model.dq_trial, model.q_test))
+    for bc in model.bcs:
+        bc.apply(K_ref)
 
     model.q_old.assign(make_mixed_function(model, exact_fields, 0, spaces, assigner))
     model.q.assign(model.q_old)
@@ -191,69 +204,79 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=1
         with operation("assemble_independent_strong_load_JIT_included", heartbeat_s,
                        detail=f"formulation={formulation} step={step}/{nsteps}"):
             force_vector = assemble(source)
-        converged = False
-        initial_norm = None
+        regularization_lambda = regularized_newton_initial_lambda
         step_initial_norm = None
-        for iteration in range(newton_maxit):
-            with operation("assemble_Newton_jacobian", heartbeat_s,
-                           detail=f"formulation={formulation} step={step}/{nsteps} Newton={iteration+1}"):
-                A = assemble(model.jacobian)
-            with operation("assemble_Newton_residual", heartbeat_s,
-                           detail=f"formulation={formulation} step={step}/{nsteps} Newton={iteration+1}"):
-                rhs = assemble(model.residual)
-            rhs *= -1.0
-            ramp = min(1.0, float(iteration + 1) / force_ramp_iters) if force_ramp_iters > 0 else 1.0
-            rhs.axpy(ramp, force_vector)
-            for bc in model.bcs:
-                bc.apply(A, rhs)
-            norm = rhs.norm("l2")
-            log(f"NEWTON | formulation={formulation} step={step}/{nsteps} iteration={iteration+1} "
-                f"residual={norm:.8e} atol={newton_atol:.3e} rtol={newton_rtol:.3e}")
-            initial_norm = norm if initial_norm is None else initial_norm
-            step_initial_norm = norm if step_initial_norm is None else step_initial_norm
-            if norm <= newton_atol or norm / max(initial_norm, 1e-30) <= newton_rtol:
-                converged = True
-                break
-            with operation("linear_solve_mumps", heartbeat_s,
-                           detail=f"formulation={formulation} step={step}/{nsteps} Newton={iteration+1}"):
-                solve(A, model.dq_newton.vector(), rhs, "mumps")
-            q_before = model.q.vector().get_local().copy()
-            delta_q = model.dq_newton.vector().get_local()
-            accepted = False
-            for backtrack in range(newton_max_backtracks + 1):
-                step_fraction = 0.5 ** backtrack
-                with operation("evaluate_Newton_backtracking_trial", heartbeat_s,
-                               detail=f"formulation={formulation} step={step}/{nsteps} "
-                                      f"Newton={iteration+1} fraction={step_fraction:.6g}"):
-                    model.q.vector().set_local(q_before + step_fraction * delta_q)
-                    model.q.vector().apply("insert")
-                    trial_rhs = assemble(model.residual)
-                    trial_rhs *= -1.0
-                    trial_rhs.axpy(ramp, force_vector)
-                    for bc in model.bcs:
-                        bc.apply(trial_rhs)
-                    trial_norm = trial_rhs.norm("l2")
-                if np.isfinite(trial_norm) and trial_norm < norm:
-                    accepted = True
-                    log(f"NEWTON STEP | formulation={formulation} step={step}/{nsteps} "
-                        f"iteration={iteration+1} fraction={step_fraction:.6g} "
-                        f"residual_before={norm:.8e} residual_after={trial_norm:.8e} "
-                        f"backtracks={backtrack}")
+        total_iterations = 0
+        for load_stage in range(1, max(1, force_ramp_iters) + 1):
+            load_factor = float(load_stage) / float(max(1, force_ramp_iters))
+            converged = False
+            initial_norm = None
+            for iteration in range(newton_maxit):
+                total_iterations += 1
+                with operation("assemble_Newton_jacobian", heartbeat_s,
+                               detail=f"formulation={formulation} step={step}/{nsteps} Newton={iteration+1}"):
+                    A = assemble(model.jacobian)
+                with operation("assemble_Newton_residual", heartbeat_s,
+                               detail=f"formulation={formulation} step={step}/{nsteps} Newton={iteration+1}"):
+                    rhs = assemble(model.residual)
+                rhs *= -1.0
+                rhs.axpy(load_factor, force_vector)
+                for bc in model.bcs:
+                    bc.apply(A, rhs)
+                norm = rhs.norm("l2")
+                initial_norm = norm if initial_norm is None else initial_norm
+                step_initial_norm = norm if step_initial_norm is None else step_initial_norm
+                if norm <= newton_atol or norm / max(initial_norm, 1e-30) <= newton_rtol:
+                    converged = True
                     break
-            if not accepted:
-                model.q.vector().set_local(q_before)
-                model.q.vector().apply("insert")
+                q_before = model.q.vector().get_local().copy()
+                accepted = False
+                attempts = 1 if nonlinear_solver == "newton_linesearch" else regularized_newton_max_attempts
+                for _attempt in range(attempts):
+                    A_solve = A if nonlinear_solver == "newton_linesearch" else A.copy()
+                    if nonlinear_solver == "regularized_newton":
+                        A_solve.axpy(regularization_lambda, K_ref, False)
+                        for bc in model.bcs:
+                            bc.apply(A_solve)
+                    with operation("linear_solve_mumps", heartbeat_s,
+                                   detail=f"formulation={formulation} step={step}/{nsteps} Newton={iteration+1}"):
+                        solve(A_solve, model.dq_newton.vector(), rhs, "mumps")
+                    delta_q = model.dq_newton.vector().get_local()
+                    for backtrack in range(newton_max_backtracks + 1):
+                        step_fraction = 0.5 ** backtrack
+                        with operation("evaluate_Newton_backtracking_trial", heartbeat_s,
+                                       detail=f"formulation={formulation} step={step}/{nsteps} "
+                                              f"Newton={iteration+1} fraction={step_fraction:.6g}"):
+                            model.q.vector().set_local(q_before + step_fraction * delta_q)
+                            model.q.vector().apply("insert")
+                            trial_rhs = assemble(model.residual)
+                            trial_rhs *= -1.0
+                            trial_rhs.axpy(load_factor, force_vector)
+                            for bc in model.bcs:
+                                bc.apply(trial_rhs)
+                            trial_norm = trial_rhs.norm("l2")
+                        if np.isfinite(trial_norm) and trial_norm <= (1.0 - newton_armijo_c1 * step_fraction) * norm:
+                            accepted = True
+                            break
+                    if accepted:
+                        if nonlinear_solver == "regularized_newton":
+                            regularization_lambda *= regularized_newton_lambda_decay
+                        break
+                    model.q.vector().set_local(q_before)
+                    model.q.vector().apply("insert")
+                    regularization_lambda *= regularized_newton_lambda_growth
+                if not accepted:
+                    raise RuntimeError(
+                        f"{nonlinear_solver} line search failed at MMS step {step}, load stage {load_stage}, "
+                        f"iteration={iteration + 1}, residual={norm:.4e}"
+                    )
+            if not converged:
                 raise RuntimeError(
-                    f"Newton line search failed at step {step}, iteration {iteration+1}: "
-                    f"residual={norm:.4e}; no residual-reducing update in "
-                    f"{newton_max_backtracks + 1} trials"
+                    f"MMS {nonlinear_solver} failed at step {step}, load stage {load_stage}: "
+                    f"residual={norm:.4e}, atol={newton_atol:.3e}, rtol={newton_rtol:.3e}, "
+                    f"maxit={newton_maxit}"
                 )
-        if not converged:
-            raise RuntimeError(
-                f"MMS Newton solve failed at step {step}: residual={norm:.4e}, "
-                f"atol={newton_atol:.3e}, rtol={newton_rtol:.3e}, maxit={newton_maxit}"
-            )
-        step_newton_iterations.append(iteration + 1)
+        step_newton_iterations.append(total_iterations)
         step_newton_initial_residuals.append(float(step_initial_norm))
         step_newton_final_residuals.append(float(norm))
         model.update_fields()
@@ -295,7 +318,8 @@ def run_case(config_dir, nx, ny, dt, duration, nonlinear, out_csv, heartbeat_s=1
            "include_quadratic_inplane_strain": bool(cfg.get("include_quadratic_inplane_strain", True)),
            "alpha_m": float(cfg.get("alpha_m", 0.10)), "alpha_f": float(cfg.get("alpha_f", 0.20)),
            "eta_m": float(cfg["eta_m"]), "eta_k": float(cfg["eta_k"]),
-           "force_ramp_iters": force_ramp_iters, "newton_atol": newton_atol,
+           "force_ramp_iters": force_ramp_iters, "nonlinear_solver": nonlinear_solver,
+           "newton_atol": newton_atol,
            "newton_rtol": newton_rtol, "newton_maxiter": newton_maxit,
            "external_load": "independent symbolic strong-form manufactured load",
            "initial_state": "exact manufactured displacement, velocity, and acceleration at t=0",

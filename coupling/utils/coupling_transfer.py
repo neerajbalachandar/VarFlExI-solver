@@ -17,6 +17,7 @@ class CouplingTransfer:
         eta_span_comm,
         eta_cp,
         force_transfer_mode="rbf",
+        displacement_transfer_mode="rbf",
         rbf_radius=0.08,
         rbf_neighbors=24,
         max_abs_force_component=5.0e3,
@@ -32,6 +33,12 @@ class CouplingTransfer:
         if self.force_transfer_mode not in ("crm", "rbf"):
             raise ValueError(
                 f"Unsupported force_transfer_mode '{force_transfer_mode}'. "
+                "Expected 'crm' or 'rbf'."
+            )
+        self.displacement_transfer_mode = str(displacement_transfer_mode).strip().lower()
+        if self.displacement_transfer_mode not in ("crm", "rbf"):
+            raise ValueError(
+                f"Unsupported displacement_transfer_mode '{displacement_transfer_mode}'. "
                 "Expected 'crm' or 'rbf'."
             )
         self.eta_span_comm = np.asarray(eta_span_comm, dtype=float).reshape(-1)
@@ -75,16 +82,37 @@ class CouplingTransfer:
             (self.geometry_common_le_targets, self.geometry_common_te_targets)
         )
         self.geometry_aero_targets = np.vstack((self.le_targets, self.te_targets))
-        t_geometry_setup = perf_counter()
-        self.geometry_nbr_ids, self.geometry_nbr_w = RBFTransfer.build_local_rbf_map(
-            self.geometry_aero_targets[:, :2],
-            self.geometry_common_targets[:, :2],
-            self.rbf_radius,
-            n_neighbors=self.rbf_neighbors,
-        )
-        self.geometry_rbf_setup_time = perf_counter() - t_geometry_setup
-
         self.crm_backend = CommonRefinementMesh(self.domain, self.eta_span_comm)
+        self.geometry_nbr_ids = None
+        self.geometry_nbr_w = None
+        self.geometry_crm_le = None
+        self.geometry_crm_te = None
+        self.geometry_crm_le_lengths = None
+        self.geometry_crm_te_lengths = None
+        self.geometry_rbf_setup_time = 0.0
+        self.geometry_crm_setup_time = 0.0
+        t_geometry_setup = perf_counter()
+        if self.displacement_transfer_mode == "rbf":
+            self.geometry_nbr_ids, self.geometry_nbr_w = RBFTransfer.build_local_rbf_map(
+                self.geometry_aero_targets[:, :2],
+                self.geometry_common_targets[:, :2],
+                self.rbf_radius,
+                n_neighbors=self.rbf_neighbors,
+            )
+            self.geometry_rbf_setup_time = perf_counter() - t_geometry_setup
+        else:
+            self.geometry_crm_le, self.geometry_crm_le_lengths = (
+                self.crm_backend.build_edge_common_refinement_operator(
+                    0.0, xi_eps=self.edge_eval_xi_eps
+                )
+            )
+            self.geometry_crm_te, self.geometry_crm_te_lengths = (
+                self.crm_backend.build_edge_common_refinement_operator(
+                    1.0, xi_eps=self.edge_eval_xi_eps
+                )
+            )
+            self.geometry_crm_setup_time = perf_counter() - t_geometry_setup
+
         self.rbf_backend = None
         self.crm_transfer_matrix = None
         self.crm_panel_areas = None
@@ -335,7 +363,20 @@ class CouplingTransfer:
         return np.sum(nbr_w[:, :, None] * values[nbr_ids, :], axis=1)
 
     def apply_geometry_transfer(self, u_fun, fallback_tree=None, fallback_vals=None):
-        """Evaluate u_s on the common interface and RBF-map it to aero LE/TE."""
+        """Transfer structural LE/TE displacements to aerodynamic geometry."""
+        if self.displacement_transfer_mode == "crm":
+            if fallback_vals is None:
+                nodal_displacements = self.sample_vector_field_at_targets(
+                    u_fun, self.interface_coords, fallback_tree=fallback_tree, fallback_vals=fallback_vals
+                )
+            else:
+                nodal_displacements = np.asarray(fallback_vals, dtype=float).reshape(-1, 3)
+            u_le = (self.geometry_crm_le.T @ nodal_displacements) / self.geometry_crm_le_lengths[:, None]
+            u_te = (self.geometry_crm_te.T @ nodal_displacements) / self.geometry_crm_te_lengths[:, None]
+            u_common = nodal_displacements
+            u_aero_geometry = np.vstack((u_le, u_te))
+            return u_le, u_te, u_common, u_aero_geometry
+
         u_common = self.sample_vector_field_at_targets(
             u_fun,
             self.geometry_common_targets,

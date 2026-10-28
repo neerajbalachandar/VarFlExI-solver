@@ -337,6 +337,7 @@ class VarFlExICoupler:
                     "crm_setup_time",
                     "rbf_setup_time",
                     "geometry_rbf_setup_time",
+                    "geometry_crm_setup_time",
                     "geometry_residual",
                     "geometry_reference_norm",
                     "geometry_relative_error",
@@ -490,6 +491,7 @@ class VarFlExICoupler:
                 crm_setup_time = optional_float(force_transfer_data, "crm_setup_time")
                 rbf_setup_time = optional_float(force_transfer_data, "rbf_setup_time")
                 geometry_rbf_setup_time = optional_float(force_transfer_data, "geometry_rbf_setup_time")
+                geometry_crm_setup_time = optional_float(force_transfer_data, "geometry_crm_setup_time")
 
                 json.dump(
                     {
@@ -517,6 +519,7 @@ class VarFlExICoupler:
                         "crm_setup_time": crm_setup_time,
                         "rbf_setup_time": rbf_setup_time,
                         "geometry_rbf_setup_time": geometry_rbf_setup_time,
+                        "geometry_crm_setup_time": geometry_crm_setup_time,
                         "geometry_residual": geometry_residual,
                         "geometry_reference_norm": geometry_reference_norm,
                         "geometry_relative_error": geometry_relative_error,
@@ -563,6 +566,7 @@ class VarFlExICoupler:
                         f"{crm_setup_time:.6e}" if crm_setup_time == crm_setup_time else "nan",
                         f"{rbf_setup_time:.6e}" if rbf_setup_time == rbf_setup_time else "nan",
                         f"{geometry_rbf_setup_time:.6e}" if geometry_rbf_setup_time == geometry_rbf_setup_time else "nan",
+                        f"{geometry_crm_setup_time:.6e}" if geometry_crm_setup_time == geometry_crm_setup_time else "nan",
                         f"{geometry_residual:.6e}",
                         f"{geometry_reference_norm:.6e}",
                         f"{geometry_relative_error:.6e}",

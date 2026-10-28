@@ -213,6 +213,42 @@ class StructuralSolver:
             )
         )
         self.force_relax = cfg_get(self.coupling_config, "force_relax", default=1.0)
+        self.nonlinear_solver = str(
+            cfg_get(self.solid_config, "nonlinear_solver", default="newton_linesearch")
+        ).strip().lower()
+        if self.nonlinear_solver == "newton_line_search":
+            self.nonlinear_solver = "newton_linesearch"
+        if self.nonlinear_solver not in ("newton_linesearch", "regularized_newton"):
+            raise ValueError(
+                "nonlinear_solver must be 'newton_linesearch' or 'regularized_newton'"
+            )
+        self.newton_max_backtracks = int(
+            cfg_get(self.solid_config, "newton_max_backtracks", default=12)
+        )
+        self.newton_armijo_c1 = float(
+            cfg_get(self.solid_config, "newton_armijo_c1", default=1.0e-4)
+        )
+        self.regularized_newton_initial_lambda = float(
+            cfg_get(self.solid_config, "regularized_newton_initial_lambda", default=1.0e-6)
+        )
+        self.regularized_newton_lambda_growth = float(
+            cfg_get(self.solid_config, "regularized_newton_lambda_growth", default=10.0)
+        )
+        self.regularized_newton_lambda_decay = float(
+            cfg_get(self.solid_config, "regularized_newton_lambda_decay", default=0.25)
+        )
+        self.regularized_newton_max_attempts = int(
+            cfg_get(self.solid_config, "regularized_newton_max_attempts", default=8)
+        )
+        if self.regularized_newton_initial_lambda <= 0.0:
+            raise ValueError("regularized_newton_initial_lambda must be positive")
+        if self.regularized_newton_lambda_growth <= 1.0:
+            raise ValueError("regularized_newton_lambda_growth must exceed one")
+        if not 0.0 < self.regularized_newton_lambda_decay <= 1.0:
+            raise ValueError("regularized_newton_lambda_decay must lie in (0, 1]")
+        if self.regularized_newton_max_attempts < 1:
+            raise ValueError("regularized_newton_max_attempts must be at least one")
+        self._regularization_reference_matrix = None
 
         self.dofs_u_x, self.dofs_u_y, self.dofs_w = self.model.extract_dof_maps()
 
@@ -224,6 +260,9 @@ class StructuralSolver:
             eta_cp=self.eta_cp,
             force_transfer_mode=cfg_get(
                 self.coupling_config, "force_transfer_mode", default="rbf"
+            ),
+            displacement_transfer_mode=cfg_get(
+                self.coupling_config, "displacement_transfer_mode", default="rbf"
             ),
             rbf_radius=cfg_get(self.coupling_config, "rbf_radius", default=0.08),
             rbf_neighbors=cfg_get(self.coupling_config, "rbf_neighbors", default=24),
@@ -237,7 +276,9 @@ class StructuralSolver:
             debug_io=self.DEBUG_IO,
         )
         self.force_transfer_mode = self.transfer.force_transfer_mode
+        self.displacement_transfer_mode = self.transfer.displacement_transfer_mode
         print(f"Solid force transfer mode: {self.force_transfer_mode}")
+        print(f"Solid displacement transfer mode: {self.displacement_transfer_mode}")
         self.crm_transfer_matrix = self.transfer.crm_transfer_matrix
         self.crm_panel_areas = self.transfer.crm_panel_areas
         self.crm_panel_polys = self.transfer.crm_panel_polys
@@ -385,38 +426,113 @@ class StructuralSolver:
         self.sock.sendall((json.dumps(init_msg) + "\n").encode())
         print("Initial zero geometry sent.")
 
-    def _solve_newton_step(self, ext_force_vec):
-        converged = False
+    def _assemble_equilibrium_residual(self, ext_force_vec, load_factor):
+        """Return minus the fixed-load residual, with Dirichlet rows imposed."""
+        residual = assemble(self.model.residual)
+        rhs = residual.copy()
+        rhs *= -1.0
+        rhs.axpy(float(load_factor), ext_force_vec)
+        for bc in self.model.bcs:
+            bc.apply(rhs)
+        return rhs
+
+    def _regularization_reference(self):
+        """Reference stiffness used by regularized Newton, assembled once."""
+        if self._regularization_reference_matrix is None:
+            K_ref = assemble(self.model.stiffness_form(self.model.dq_trial, self.model.q_test))
+            for bc in self.model.bcs:
+                bc.apply(K_ref)
+            self._regularization_reference_matrix = K_ref
+        return self._regularization_reference_matrix
+
+    def _line_search(self, q_before, delta_q, ext_force_vec, load_factor, residual_norm):
+        """Armijo backtracking on the residual-norm-squared merit function."""
+        for backtrack in range(self.newton_max_backtracks + 1):
+            step_fraction = 0.5 ** backtrack
+            self.model.q.vector().set_local(q_before + step_fraction * delta_q)
+            self.model.q.vector().apply("insert")
+            trial_norm = self._assemble_equilibrium_residual(ext_force_vec, load_factor).norm("l2")
+            sufficient_decrease = trial_norm <= (1.0 - self.newton_armijo_c1 * step_fraction) * residual_norm
+            if np.isfinite(trial_norm) and sufficient_decrease:
+                return True, step_fraction, trial_norm, backtrack
+        self.model.q.vector().set_local(q_before)
+        self.model.q.vector().apply("insert")
+        return False, 0.0, residual_norm, self.newton_max_backtracks + 1
+
+    def _solve_nonlinear_load_stage(self, ext_force_vec, load_factor, regularization_lambda):
+        """Solve one fixed external-load continuation stage."""
         r0 = None
-        r_rel = np.inf
         r_norm = np.inf
         for newton_it in range(self.newton_maxit):
             A = assemble(self.model.jacobian)
-            R = assemble(self.model.residual)
-            b = R.copy()
-            b *= -1.0
-            if self.force_ramp_iters > 0:
-                ramp = min(1.0, float(newton_it + 1) / float(self.force_ramp_iters))
-            else:
-                ramp = 1.0
-            b.axpy(ramp, ext_force_vec)
+            rhs = self._assemble_equilibrium_residual(ext_force_vec, load_factor)
             for bc in self.model.bcs:
-                bc.apply(A, b)
-            r_norm = b.norm("l2")
+                bc.apply(A)
+            r_norm = rhs.norm("l2")
             if r0 is None:
                 r0 = max(r_norm, 1.0e-16)
             r_rel = r_norm / r0
             if r_norm <= self.newton_atol or r_rel <= self.newton_rtol:
-                converged = True
-                break
-            self.model.linear_solver.solve(A, self.model.dq_newton.vector(), b)
-            self.model.q.vector().axpy(1.0, self.model.dq_newton.vector())
-            self.model.q.vector().apply("insert")
-        if not converged:
-            raise RuntimeError(
-                f"Newton failed: residual={r_norm:.6e}, relative={r_rel:.6e}, "
-                f"atol={self.newton_atol:.2e}, rtol={self.newton_rtol:.2e}, "
-                f"maxit={self.newton_maxit}, ramp_iters={self.force_ramp_iters}"
+                return regularization_lambda
+
+            q_before = self.model.q.vector().get_local().copy()
+            accepted = False
+            if self.nonlinear_solver == "newton_linesearch":
+                self.model.linear_solver.solve(A, self.model.dq_newton.vector(), rhs)
+                accepted, step_fraction, trial_norm, backtracks = self._line_search(
+                    q_before,
+                    self.model.dq_newton.vector().get_local(),
+                    ext_force_vec,
+                    load_factor,
+                    r_norm,
+                )
+            else:
+                for regularization_attempt in range(self.regularized_newton_max_attempts):
+                    A_reg = A.copy()
+                    A_reg.axpy(regularization_lambda, self._regularization_reference(), False)
+                    for bc in self.model.bcs:
+                        bc.apply(A_reg)
+                    self.model.linear_solver.solve(A_reg, self.model.dq_newton.vector(), rhs)
+                    accepted, step_fraction, trial_norm, backtracks = self._line_search(
+                        q_before,
+                        self.model.dq_newton.vector().get_local(),
+                        ext_force_vec,
+                        load_factor,
+                        r_norm,
+                    )
+                    if accepted:
+                        regularization_lambda *= self.regularized_newton_lambda_decay
+                        break
+                    regularization_lambda *= self.regularized_newton_lambda_growth
+
+            if not accepted:
+                raise RuntimeError(
+                    f"{self.nonlinear_solver} line search failed: load_factor={load_factor:.3e}, "
+                    f"iteration={newton_it + 1}, residual={r_norm:.4e}, "
+                    f"backtracks={backtracks}"
+                )
+            if self.DEBUG_IO:
+                print(
+                    f"{self.nonlinear_solver}: load={load_factor:.3f}, Newton={newton_it + 1}, "
+                    f"step={step_fraction:.3e}, backtracks={backtracks}, "
+                    f"residual={r_norm:.3e}->{trial_norm:.3e}"
+                )
+
+        raise RuntimeError(
+            f"{self.nonlinear_solver} failed: load_factor={load_factor:.3e}, "
+            f"residual={r_norm:.6e}, relative={r_rel:.6e}, "
+            f"atol={self.newton_atol:.2e}, rtol={self.newton_rtol:.2e}, "
+            f"maxit={self.newton_maxit}"
+        )
+
+    def _solve_newton_step(self, ext_force_vec):
+        """Solve the step with fixed-load Newton stages and globalization."""
+        n_load_stages = max(1, self.force_ramp_iters)
+        regularization_lambda = self.regularized_newton_initial_lambda
+        for stage in range(1, n_load_stages + 1):
+            load_factor = float(stage) / float(n_load_stages)
+            regularization_lambda = self._solve_nonlinear_load_stage(
+                ext_force_vec, load_factor, regularization_lambda
             )
 
     def run(self):
@@ -549,6 +665,7 @@ class StructuralSolver:
                 "crm_setup_time": self.transfer.crm_setup_time,
                 "rbf_setup_time": self.transfer.rbf_setup_time,
                 "geometry_rbf_setup_time": self.transfer.geometry_rbf_setup_time,
+                "geometry_crm_setup_time": self.transfer.geometry_crm_setup_time,
             }
             self.sock.sendall((json.dumps(force_transfer_msg) + "\n").encode())
 

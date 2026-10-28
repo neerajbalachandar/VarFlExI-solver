@@ -199,6 +199,67 @@ class CommonRefinementMesh:
 
         return C, panel_areas, panel_polys
 
+    def build_edge_common_refinement_operator(self, xi, xi_eps=0.0):
+        """Build a CG1-to-span-segment averaging operator along a chord line.
+
+        The target segments are the dual span cells centred on the aerodynamic
+        stations.  Integrating the CG1 basis over their intersections with
+        structural triangles is the one-dimensional common-refinement analogue
+        of the panel operator used for force transfer.
+        """
+        xi_eval = float(np.clip(float(xi), float(xi_eps), 1.0 - float(xi_eps)))
+        span_edges = self.span_edges_from_stations(self.eta_span_comm)
+        trial_space = FunctionSpace(self.domain.mesh, "CG", 1)
+        dofmap = trial_space.dofmap()
+        ndofs = trial_space.dim()
+        C = np.zeros((ndofs, len(self.eta_span_comm)), dtype=float)
+        lengths = np.zeros((len(self.eta_span_comm),), dtype=float)
+
+        for j_idx in range(len(self.eta_span_comm)):
+            y0 = span_edges[j_idx] * self.domain.span
+            y1 = span_edges[j_idx + 1] * self.domain.span
+            p0 = np.array(
+                [self.domain.x_leading_edge_at(y0) + xi_eval * self.domain.chord_at(y0), y0],
+                dtype=float,
+            )
+            p1 = np.array(
+                [self.domain.x_leading_edge_at(y1) + xi_eval * self.domain.chord_at(y1), y1],
+                dtype=float,
+            )
+            direction = p1 - p0
+            lengths[j_idx] = max(float(np.linalg.norm(direction)), 1.0e-14)
+
+            for cell in cells(self.domain.mesh):
+                cell_index = cell.index()
+                vert_ids = cell.entities(0)
+                tri = self.domain.mesh.coordinates()[vert_ids, :2]
+                bary0 = self.barycentric_coords_triangle(p0, tri)
+                bary1 = self.barycentric_coords_triangle(p1, tri)
+                if bary0 is None or bary1 is None:
+                    continue
+                slope = bary1 - bary0
+                t_lo, t_hi = 0.0, 1.0
+                valid = True
+                for lam0, dlam in zip(bary0, slope):
+                    if abs(dlam) <= 1.0e-14:
+                        if lam0 < -1.0e-14:
+                            valid = False
+                            break
+                    elif dlam > 0.0:
+                        t_lo = max(t_lo, -lam0 / dlam)
+                    else:
+                        t_hi = min(t_hi, -lam0 / dlam)
+                if not valid or t_hi - t_lo <= 1.0e-14:
+                    continue
+                # Integral of each affine CG1 basis function over the segment.
+                basis_integral = lengths[j_idx] * (
+                    bary0 * (t_hi - t_lo)
+                    + 0.5 * slope * (t_hi * t_hi - t_lo * t_lo)
+                )
+                C[dofmap.cell_dofs(cell_index), j_idx] += basis_integral
+
+        return C, lengths
+
     @staticmethod
     def panel_loads_to_solid_nodal_forces(panel_forces, C, panel_areas):
         panel_forces = np.asarray(panel_forces, dtype=float).reshape(-1, 3)
