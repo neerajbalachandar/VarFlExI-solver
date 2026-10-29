@@ -77,20 +77,39 @@ wing = make_cantilever_template(
 )
 wing_ref = deepcopy(wing)
 
-# Optional verification hook: add constant manufactured sources to particle
-# position, circulation, and core-width equations at each native rVPM RK3
-# stage. Normal runs retain FLOWVPM.rungekutta3 directly.
+# Optional fixed-population coupled MMS target. A target manifest takes
+# precedence over the legacy constant-source variables; the legacy path is
+# unchanged when no manifest is provided.
+mms_target_path = strip(string(something(args["mms_target"], get(ENV, "VARFLEXI_MMS_TARGET", ""))))
+mms_target = nothing
+mms_target_enabled = !isempty(mms_target_path)
+if mms_target_enabled
+    if !isdefined(@__MODULE__, :CoupledMMSTarget)
+        include(joinpath(@__DIR__, "mms_coupled_source.jl"))
+    end
+    mms_target = CoupledMMSTarget(mms_target_path)
+end
 mms_state_source_text = strip(get(ENV, "VARFLEXI_MMS_STATE_SOURCE", ""))
 mms_position_source_text = strip(get(ENV, "VARFLEXI_MMS_POSITION_SOURCE", ""))
-!isempty(mms_state_source_text) && !isempty(mms_position_source_text) && error(
-    "Set only one of VARFLEXI_MMS_STATE_SOURCE and VARFLEXI_MMS_POSITION_SOURCE"
-)
+if mms_target_enabled && (!isempty(mms_state_source_text) || !isempty(mms_position_source_text))
+    println(stderr, "WARNING: VARFLEXI_MMS_TARGET takes precedence over VARFLEXI_MMS_STATE_SOURCE and VARFLEXI_MMS_POSITION_SOURCE")
+end
 mms_source_text = isempty(mms_state_source_text) ? mms_position_source_text : mms_state_source_text
-mms_state_source_enabled = !isempty(mms_source_text)
+mms_state_source_enabled = mms_target_enabled || !isempty(mms_source_text)
 mms_rk3_stage_trace = NamedTuple[]
+mms_target_seeded = Ref(false)
+mms_target_start = Ref(0)
 if !mms_state_source_enabled
     vpm_integration = vpm.rungekutta3
+elseif mms_target_enabled
+    mms_source! = make_coupled_mms_source(mms_target, nothing)
+    mms_initializer! = pf -> seed_coupled_mms_particles!(mms_target, pf)
+    vpm_integration = MMSRK3StateSource(mms_source!, mms_rk3_stage_trace; initialize! = mms_initializer!)
+    println("Target-driven fixed-population rVPM MMS source active: $(mms_target_path)")
 else
+    !isempty(mms_state_source_text) && !isempty(mms_position_source_text) && error(
+        "Set only one of VARFLEXI_MMS_STATE_SOURCE and VARFLEXI_MMS_POSITION_SOURCE"
+    )
     lowercase(strip(solver_cfg.vpm_sfs)) in ("none", "off", "false") || error(
         "The particle-position MMS component requires vpm_sfs=none so its position source cannot enter SFS strength evolution"
     )
@@ -147,6 +166,10 @@ save_path = isabspath(solver_cfg.save_path) ?
             solver_cfg.save_path :
             normpath(joinpath(final_dir, solver_cfg.save_path))
 run_name = solver_cfg.run_name
+configured_mms_output = strip(string(something(args["mms_output"], get(ENV, "VARFLEXI_MMS_OUTPUT", ""))))
+if !isempty(configured_mms_output)
+    save_path = abspath(configured_mms_output)
+end
 create_savepath = solver_cfg.create_savepath
 prompt = solver_cfg.prompt
 nsteps_save = solver_cfg.nsteps_save
@@ -277,6 +300,16 @@ println(
 sock = connect_to_server(coupling_cfg.host, coupling_cfg.port)
 
 m_span = vlm.get_m(wing)
+if mms_target_enabled
+    mms_target_wing = deepcopy(wing_ref)
+    mms_target_system = vlm.WingSystem()
+    vlm.addwing(mms_target_system, "Wing", mms_target_wing)
+    vlm.setVinf(mms_target_system, Vinf)
+    ensure_gamma!(mms_target_system, vlm.get_m(mms_target_system))
+    previous_target_force_system = Ref(deepcopy(mms_target_system))
+    mms_target_history_initialized = Ref(false)
+    target_forces_prev = zeros(m_span, 3)
+end
 ys_ref = [wing_ref._ym[i] for i in 1:m_span]
 eta_span_fluid = [clamp(ys_ref[i] / span, 0.0, 1.0) for i in 1:m_span]
 eta_span_coupling = build_coupling_eta_span(
@@ -340,11 +373,14 @@ lift_hist = Float64[]
 drag_hist = Float64[]
 cl_hist = Float64[]
 cd_hist = Float64[]
+cm_hist = Float64[]
 fluid_step_time_hist = Float64[]
 fluid_interstep_time_hist = Float64[]
 previous_callback_end_ns = Ref{UInt64}(0)
 force_trace_path = joinpath(save_path, run_name * "_force_payload_history.jsonl")
 force_trace_io = open(force_trace_path, "w")
+force_payload_history = Dict{String,Any}[]
+wake_probe_history = Dict{String,Any}[]
 diag_path = joinpath(save_path, run_name * "_coupling_diagnostics.csv")
 
 msg0 = read_json_line(sock, "init")

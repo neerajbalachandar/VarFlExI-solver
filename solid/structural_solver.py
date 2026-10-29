@@ -9,12 +9,19 @@ for p in sys.path:
 
 from dolfin import *
 import argparse
+import csv
 import json
 import os
 import socket
 
 import numpy as np
 import yaml
+from pathlib import Path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from verification.mms.coupled_target import CoupledMMSTarget as PythonMMSTarget
+from verification.mms.coupled_solid_source import (
+    ReferenceForceFunctional, add_coupled_mms_source, _target_function,
+)
 
 from utils import SolidDomain, ReissnerMindlinModel
 from coupling.utils.coupling_transfer import CouplingTransfer
@@ -72,12 +79,16 @@ def residual_metrics(current, previous, epsilon_reg):
 
 
 class StructuralSolver:
-    def __init__(self, config_path):
+    def __init__(self, config_path, mms_target_path=None, mms_output=None):
         self.repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         self.config_path = config_path
         self.solid_config = load_yaml_config(config_path, "solid_params.yaml")
         self.fluid_config = load_yaml_config(config_path, "fluid_params.yaml")
         self.coupling_config = load_yaml_config(config_path, "coupling_params.yaml")
+        self.mms_target_path = mms_target_path
+        self.mms_output = mms_output
+        self.mms_target = None
+        self._newton_step_stats = {}
 
         self._setup_simulation_data()
         self._setup_domain()
@@ -86,6 +97,24 @@ class StructuralSolver:
         self._setup_output()
         self._setup_socket()
         self._setup_history()
+        if self.mms_target_path:
+            with open(self.mms_target_path, encoding="utf-8") as stream:
+                self.mms_target = PythonMMSTarget.from_manifest(json.load(stream))
+            self.reference_force = ReferenceForceFunctional(self.model, self.mms_target)
+            self.mms_spaces = [self.model.V.sub(i).collapse() for i in range(3)]
+            # The numerical solve starts from the target's declared initial
+            # data. For the current ramp target q(0)=q_t(0)=0 while q_tt(0)
+            # is generally nonzero; this is an initial condition, not a
+            # replacement of any subsequent numerical state.
+            self.model.q.assign(_target_function(self.model, self.mms_target, 0.0, 0, self.mms_spaces))
+            self.model.q_old.assign(_target_function(self.model, self.mms_target, 0.0, 0, self.mms_spaces))
+            self.model.v_old.assign(_target_function(self.model, self.mms_target, 0.0, 1, self.mms_spaces))
+            self.model.a_old.assign(_target_function(self.model, self.mms_target, 0.0, 2, self.mms_spaces))
+            self.mms_rhs_source = None
+            out = self.mms_output or self.out_dir
+            os.makedirs(out, exist_ok=True)
+            self.mms_history = open(os.path.join(out, "solid_mms_history.csv"), "w", encoding="utf-8")
+            self.mms_history.write("step,time_s,target_force,numerical_force,target_state,numerical_state,state_error_l2,source_l2\n")
 
     def _setup_simulation_data(self):
         self.T = float(self.coupling_config["total_time"])
@@ -344,6 +373,17 @@ class StructuralSolver:
             "# step time station x y z u_ref_x u_ref_y u_ref_z u_geom_x u_geom_y u_geom_z "
             "err_x err_y err_z err_norm\\n"
         )
+        self.state_history_path = os.path.join(self.out_dir, "solid_state_history.csv")
+        self.state_history_fp = open(self.state_history_path, "w", newline="", encoding="utf-8")
+        self.state_history_writer = csv.writer(self.state_history_fp)
+        state_header = ["step", "time_s", "E_elas_J", "E_kin_J", "E_damp_J", "E_total_J",
+                        "surface_strain_rms", "surface_strain_max", "membrane_stress_max_N_per_m",
+                        "newton_iterations", "newton_residual_norm", "newton_relative_residual", "newton_load_stages"]
+        for loc in ("tip", "midspan", "leading_edge_midspan"):
+            for field in ("u", "v", "w", "theta_x", "theta_y"):
+                for deriv in ("displacement", "velocity", "acceleration"):
+                    state_header.append(f"{loc}_{field}_{deriv}")
+        self.state_history_writer.writerow(state_header)
 
     def _setup_socket(self):
         print("Connecting solid to coupling server...")
@@ -366,6 +406,12 @@ class StructuralSolver:
         self.strain_increase_percentage_points = np.zeros((self.Nsteps,), dtype=float)
         self.initial_surface_strain_rms = self.model.compute_surface_strain_rms()
         self.energies = np.zeros((self.Nsteps + 1, 4), dtype=float)
+        self.surface_strain_max = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.membrane_stress_max = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.newton_iterations = np.zeros((self.Nsteps,), dtype=int)
+        self.newton_residual_norm = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.newton_relative_residual = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.newton_load_stages = np.zeros((self.Nsteps,), dtype=int)
         self.step_walltime = np.full((self.Nsteps,), np.nan, dtype=float)
         self.E_damp_acc = 0.0
         self.forces_prev = None
@@ -432,6 +478,8 @@ class StructuralSolver:
         rhs = residual.copy()
         rhs *= -1.0
         rhs.axpy(float(load_factor), ext_force_vec)
+        if self.mms_rhs_source is not None:
+            rhs.axpy(1.0, self.mms_rhs_source)
         for bc in self.model.bcs:
             bc.apply(rhs)
         return rhs
@@ -473,6 +521,11 @@ class StructuralSolver:
                 r0 = max(r_norm, 1.0e-16)
             r_rel = r_norm / r0
             if r_norm <= self.newton_atol or r_rel <= self.newton_rtol:
+                self._newton_stage_stats.append({
+                    "iterations": newton_it,
+                    "residual_norm": float(r_norm),
+                    "relative_residual": float(r_rel),
+                })
                 return regularization_lambda
 
             q_before = self.model.q.vector().get_local().copy()
@@ -527,6 +580,7 @@ class StructuralSolver:
 
     def _solve_newton_step(self, ext_force_vec):
         """Solve the step with fixed-load Newton stages and globalization."""
+        self._newton_stage_stats = []
         n_load_stages = max(1, self.force_ramp_iters)
         regularization_lambda = self.regularized_newton_initial_lambda
         for stage in range(1, n_load_stages + 1):
@@ -534,6 +588,39 @@ class StructuralSolver:
             regularization_lambda = self._solve_nonlinear_load_stage(
                 ext_force_vec, load_factor, regularization_lambda
             )
+        stages = self._newton_stage_stats
+        self._newton_step_stats = {
+            "iterations": sum(stage["iterations"] for stage in stages),
+            "residual_norm": stages[-1]["residual_norm"] if stages else float("nan"),
+            "relative_residual": stages[-1]["relative_residual"] if stages else float("nan"),
+            "load_stages": len(stages),
+        }
+
+    def _sample_state_history(self, step, time_s, energies, strain_rms, strain_max, stress_max):
+        """Write physical state/derivative samples at representative plate locations."""
+        points = {
+            "tip": (self.tip_x, self.tip_y),
+            "midspan": (self.domain.x_leading_edge_at(0.5 * self.span) + 0.5 * self.domain.chord_at(0.5 * self.span), 0.5 * self.span),
+            "leading_edge_midspan": (self.domain.x_leading_edge_at(0.5 * self.span), 0.5 * self.span),
+        }
+        row = [int(step), float(time_s), *map(float, energies), float(strain_rms),
+               float(strain_max), float(stress_max), self._newton_step_stats.get("iterations", 0),
+               self._newton_step_stats.get("residual_norm", float("nan")),
+               self._newton_step_stats.get("relative_residual", float("nan")),
+               self._newton_step_stats.get("load_stages", 0)]
+        for x, y in points.values():
+            point = Point(float(x), float(y))
+            values = []
+            for field in (self.model.q_old, self.model.v_old, self.model.a_old):
+                try:
+                    vals = np.asarray(field(point), dtype=float).reshape(-1)
+                    values.append(vals[:5])
+                except (RuntimeError, ValueError):
+                    values.append(np.full(5, np.nan))
+            for component in range(5):
+                row.extend([float(values[0][component]), float(values[1][component]), float(values[2][component])])
+        self.state_history_writer.writerow(row)
+        self.state_history_fp.flush()
 
     def run(self):
         self._send_initial_geometry()
@@ -547,6 +634,18 @@ class StructuralSolver:
 
             data = json.loads(line)
             step_start = perf_counter()
+            if self.mms_target is not None:
+                if "target_force" not in data:
+                    raise RuntimeError("MMS target run requires target_force in the fluid socket payload")
+                target_force = np.asarray(data["target_force"], dtype=float)
+                self.reference_force.set_panel_forces(target_force)
+                physical_time = float(data.get("fluid_time_s", (i_step + 1) * self.dt_value))
+                self.mms_rhs_source = add_coupled_mms_source(
+                    self.model, self.mms_target, physical_time, self.reference_force,
+                    self.mms_spaces,
+                )
+                if i_step == 0:
+                    self._mms_target_force_current = target_force.copy()
             self.force_residuals[i_step] = optional_float(data, "force_residual")
             self.force_reference_norms[i_step] = optional_float(data, "force_reference_norm")
             self.force_relative_errors[i_step] = optional_float(data, "force_relative_error")
@@ -595,6 +694,24 @@ class StructuralSolver:
 
             solid_solve_start = perf_counter()
             self._solve_newton_step(ext_force_vec)
+            self.newton_iterations[i_step] = int(self._newton_step_stats.get("iterations", 0))
+            self.newton_residual_norm[i_step] = self._newton_step_stats.get("residual_norm", np.nan)
+            self.newton_relative_residual[i_step] = self._newton_step_stats.get("relative_residual", np.nan)
+            self.newton_load_stages[i_step] = int(self._newton_step_stats.get("load_stages", 0))
+            if self.mms_target is not None:
+                num_state = self.model.q.vector().get_local()
+                tgt_func = _target_function(
+                    self.model, self.mms_target, physical_time, 0,
+                    self.mms_spaces,
+                )
+                tgt_state = tgt_func.vector().get_local()
+                srcnorm = self.mms_rhs_source.norm("l2") if self.mms_rhs_source is not None else 0.0
+                self.mms_history.write(
+                    f"{i_step+1},{physical_time:.16e},{json.dumps(data.get('target_force', []))},"
+                    f"{json.dumps(data.get('force', []))},{json.dumps(tgt_state.tolist())},"
+                    f"{json.dumps(num_state.tolist())},{np.linalg.norm(num_state-tgt_state):.16e},{srcnorm:.16e}\n"
+                )
+                self.mms_history.flush()
             solid_solve_time = perf_counter() - solid_solve_start
             self.solid_solve_times[i_step] = solid_solve_time
             interface_disp_cur = self.transfer.get_nodal_displacements_plate(
@@ -675,6 +792,10 @@ class StructuralSolver:
                 "rbf_setup_time": self.transfer.rbf_setup_time,
                 "geometry_rbf_setup_time": self.transfer.geometry_rbf_setup_time,
                 "geometry_crm_setup_time": self.transfer.geometry_crm_setup_time,
+                "newton_iterations": self._newton_step_stats.get("iterations", 0),
+                "newton_residual_norm": self._newton_step_stats.get("residual_norm", float("nan")),
+                "newton_relative_residual": self._newton_step_stats.get("relative_residual", float("nan")),
+                "newton_load_stages": self._newton_step_stats.get("load_stages", 0),
             }
             self.sock.sendall((json.dumps(force_transfer_msg) + "\n").encode())
 
@@ -685,8 +806,33 @@ class StructuralSolver:
                 surface_strain_rms - self.initial_surface_strain_rms
             )
             t = self.time[i_step + 1]
+            u_mem, w_mem, theta_mem = split(self.model.q_old)
+            membrane_strain = (
+                self.model.nonlinear_membrane_strain(u_mem, w_mem)
+                if self.model.geometric_nonlinearity
+                else self.model.membrane_strain(u_mem)
+            )
+            strain_field = project(membrane_strain, self.model.Vsig)
+            stress_field = project(self.model.membrane_stress_from_strain(membrane_strain), self.model.Vsig)
+            strain_values = strain_field.vector().get_local().reshape((-1, 4))
+            stress_values = stress_field.vector().get_local().reshape((-1, 4))
+            surface_strain_max = float(np.max(np.linalg.norm(strain_values, axis=1))) if strain_values.size else 0.0
+            membrane_stress_max = float(np.max(np.linalg.norm(stress_values, axis=1))) if stress_values.size else 0.0
+            self.surface_strain_max[i_step] = surface_strain_max
+            self.membrane_stress_max[i_step] = membrane_stress_max
+            self.model.sig.assign(stress_field)
             solid_io_start = perf_counter()
             self.xdmf_file.write(self.model.q, t)
+            # The mixed Reissner-Mindlin state has value dimension five
+            # (in-plane displacement[2], transverse displacement, rotation[2]);
+            # DOLFIN's legacy VTK writer cannot serialize that mixed vector.
+            # Export the physical three-component displacement to the PVD.
+            plate_displacement = project(
+                self.model.displacement_3d(self.model.q), self.model.Vt
+            )
+            plate_displacement.rename("PlateDisplacement", "")
+            self.q_pvd << (plate_displacement, t)
+            self.sig_pvd << (self.model.sig, t)
             solid_io_time = perf_counter() - solid_io_start
             self.solid_io_times[i_step] = solid_io_time
 
@@ -695,6 +841,8 @@ class StructuralSolver:
             self.E_damp_acc += self.model.compute_damping_increment(self.dt_value)
             E_tot = E_elas + E_kin + self.E_damp_acc
             self.energies[i_step + 1, :] = np.array([E_elas, E_kin, self.E_damp_acc, E_tot])
+            self._sample_state_history(i_step + 1, t, self.energies[i_step + 1, :],
+                                       surface_strain_rms, surface_strain_max, membrane_stress_max)
 
             try:
                 vals = self.model.q(Point(self.tip_x, self.tip_y))
@@ -839,12 +987,14 @@ class StructuralSolver:
 
     def _finalize(self):
         self.geometry_consistency_fp.close()
+        self.state_history_fp.close()
         self.sock_file.close()
         self.sock.close()
         print("Solid solver finished.")
         print(f"Solid field outputs: {self.xdmf_path}")
         print(f"Solid VTK outputs: {self.q_pvd_path}, {self.sig_pvd_path}, {self.mesh_pvd_path}")
         print(f"CP geometry consistency data: {self.geometry_consistency_path}")
+        print(f"Structural state history: {self.state_history_path}")
 
         diag_csv = os.path.join(
             self.out_dir,
@@ -861,7 +1011,8 @@ class StructuralSolver:
                 "force_transfer_apply_time,"
                 "geometry_residual,geometry_reference_norm,geometry_relative_error,geometry_transfer_apply_time,"
                 "surface_strain_percent,strain_increase_percentage_points,"
-                "solid_solve_time,solid_io_time,step_walltime\n"
+                "solid_solve_time,solid_io_time,step_walltime,surface_strain_max,membrane_stress_max_N_per_m,"
+                "newton_iterations,newton_residual_norm,newton_relative_residual,newton_load_stages\n"
             )
             for k_idx in range(self.Nsteps):
                 fp.write(
@@ -895,7 +1046,13 @@ class StructuralSolver:
                     f"{self.strain_increase_percentage_points[k_idx]:.12e},"
                     f"{self.solid_solve_times[k_idx]:.12e},"
                     f"{self.solid_io_times[k_idx]:.12e},"
-                    f"{self.step_walltime[k_idx]:.12e}\n"
+                    f"{self.step_walltime[k_idx]:.12e},"
+                    f"{self.surface_strain_max[k_idx]:.12e},"
+                    f"{self.membrane_stress_max[k_idx]:.12e},"
+                    f"{self.newton_iterations[k_idx]},"
+                    f"{self.newton_residual_norm[k_idx]:.12e},"
+                    f"{self.newton_relative_residual[k_idx]:.12e},"
+                    f"{self.newton_load_stages[k_idx]}\n"
                 )
 
 
@@ -903,8 +1060,11 @@ def main():
     parser=argparse.ArgumentParser(description="Solid solver for coupled FSI simulation")
     default_config_path=os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")), "config")
     parser.add_argument("--config_path",type=str,default=default_config_path)
+    parser.add_argument("--config-dir", dest="config_path", default=default_config_path)
+    parser.add_argument("--mms-target", type=str, default=None)
+    parser.add_argument("--mms-output", type=str, default=None)
     args = parser.parse_args()
-    solver = StructuralSolver(args.config_path)
+    solver = StructuralSolver(args.config_path, args.mms_target, args.mms_output)
     solver.run()
 if __name__ == "__main__":
     main()

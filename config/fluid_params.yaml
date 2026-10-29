@@ -1,10 +1,9 @@
-
 run_name: rect_nonlinear_regime
 particles_per_step: 4
 save_every: 2
 
 aoa_deg: 3.0
-vinf: 15.0
+vinf: 25.0
 rho: 1.225
 nu: 1.5e-05
 
@@ -12,7 +11,7 @@ nu: 1.5e-05
 # Gust amplitudes are m/s, wavenumbers are rad/m; this deterministic gust is
 # not a substitute for resolved turbulence or an LES inflow.
 freestream_gradient: [0, 0, 0, 0, 0, 0, 0, 0, 0]
-freestream_oscillation: [0.30, 0.20, 0.15]
+freestream_oscillation: [2.0, 1.5, 1.0]
 freestream_wavenumber: [2.0, 1.5, 1.0]
 freestream_frequency_hz: 0.7
 freestream_phase_deg: 0.0

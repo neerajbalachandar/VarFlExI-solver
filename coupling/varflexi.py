@@ -353,6 +353,7 @@ class VarFlExICoupler:
                     "drag",
                     "cl",
                     "cd",
+                    "cm",
                     "solid_step_time",
                     "fluid_step_time",
                     "fluid_interstep_time",
@@ -360,6 +361,10 @@ class VarFlExICoupler:
                     "fluid_time_s",
                     "particle_count",
                     "bound_circulation_l2_norm",
+                    "newton_iterations",
+                    "newton_residual_norm",
+                    "newton_relative_residual",
+                    "newton_load_stages",
                 ]
             )
 
@@ -513,6 +518,10 @@ class VarFlExICoupler:
                 rbf_setup_time = optional_float(force_transfer_data, "rbf_setup_time")
                 geometry_rbf_setup_time = optional_float(force_transfer_data, "geometry_rbf_setup_time")
                 geometry_crm_setup_time = optional_float(force_transfer_data, "geometry_crm_setup_time")
+                newton_iterations = optional_float(force_transfer_data, "newton_iterations")
+                newton_residual_norm = optional_float(force_transfer_data, "newton_residual_norm")
+                newton_relative_residual = optional_float(force_transfer_data, "newton_relative_residual")
+                newton_load_stages = optional_float(force_transfer_data, "newton_load_stages")
 
                 json.dump(
                     {
@@ -565,6 +574,11 @@ class VarFlExICoupler:
                         "drag": drag,
                         "cl": cl,
                         "cd": cd,
+                        "cm": optional_float(force_data, "cm"),
+                        "newton_iterations": newton_iterations,
+                        "newton_residual_norm": newton_residual_norm,
+                        "newton_relative_residual": newton_relative_residual,
+                        "newton_load_stages": newton_load_stages,
                         "solid_step_time": solid_step_time,
                         "fluid_step_time": fluid_step_time,
                         "fluid_interstep_time": fluid_interstep_time,
@@ -613,6 +627,7 @@ class VarFlExICoupler:
                         f"{float(drag):.6e}",
                         f"{float(cl):.6e}" if cl == cl else "nan",
                         f"{float(cd):.6e}" if cd == cd else "nan",
+                        f"{optional_float(force_data, 'cm'):.6e}" if optional_float(force_data, "cm") == optional_float(force_data, "cm") else "nan",
                         f"{solid_step_time:.6e}" if solid_step_time == solid_step_time else "nan",
                         f"{fluid_step_time:.6e}" if fluid_step_time == fluid_step_time else "nan",
                         f"{fluid_interstep_time:.6e}" if fluid_interstep_time == fluid_interstep_time else "nan",
@@ -620,6 +635,10 @@ class VarFlExICoupler:
                         f"{optional_float(force_data, 'fluid_time_s'):.6e}" if optional_float(force_data, "fluid_time_s") == optional_float(force_data, "fluid_time_s") else "nan",
                         particle_count if particle_count is not None else "",
                         f"{math.sqrt(sum(value * value for value in bound_circulation or [])):.6e}",
+                        newton_iterations,
+                        f"{newton_residual_norm:.6e}" if newton_residual_norm == newton_residual_norm else "nan",
+                        f"{newton_relative_residual:.6e}" if newton_relative_residual == newton_relative_residual else "nan",
+                        newton_load_stages,
                     ]
                 )
 

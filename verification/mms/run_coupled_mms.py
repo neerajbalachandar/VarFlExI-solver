@@ -49,26 +49,26 @@ def write_config(source, destination, updates):
         yaml.dump(data, f, Dumper=_FlowListDumper, sort_keys=False)
 
 
-def run_case(manifest, output, steps=3, constant_source=None, config_dir=ROOT / "config"):
+def run_case(manifest, output, steps=3, constant_source=None, config_dir=ROOT / "config",
+             dt=SMOKE_DT, n_span=16, nx=8, ny=16):
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     work = output / "configs"
     work.mkdir(exist_ok=True)
     port = free_port()
-    dt = SMOKE_DT
     config_dir = Path(config_dir).resolve()
     write_config(config_dir / "fluid_params.yaml", work / "fluid_params.yaml", {
-        "n_span": 16, "save_directory": str(output / "fluid"), "run_name": "coupled_mms",
+        "n_span": int(n_span), "save_directory": str(output / "fluid"), "run_name": "coupled_mms",
         "prompt": False, "save_horseshoes": False, "save_geometry_csv": False,
         "save_every": 1,
     })
     write_config(config_dir / "solid_params.yaml", work / "solid_params.yaml", {
-        "nx": 8, "ny": 16, "output_dir": str(output / "solid"),
+        "nx": int(nx), "ny": int(ny), "output_dir": str(output / "solid"),
         "force_ramp_iters": 1,
     })
     write_config(config_dir / "coupling_params.yaml", work / "coupling_params.yaml", {
         "n_steps": int(steps), "total_time": dt * int(steps), "port": port,
-        "comm_nspan": 16, "results_root": str(output / "coupling"),
+        "comm_nspan": int(n_span), "results_root": str(output / "coupling"),
     })
     procs = []
     log_path = output / "process.log"
@@ -119,6 +119,31 @@ def run_case(manifest, output, steps=3, constant_source=None, config_dir=ROOT / 
     solid_history = output / "solid_mms_history.csv"
     if manifest and (not solid_history.is_file() or len(solid_history.read_text().splitlines()) != int(steps) + 1):
         raise RuntimeError(f"target/numerical solid history missing or incomplete: {solid_history}")
+    if manifest:
+        required = ("target_bound_circulation", "target_circulation_residual", "target_force",
+                    "target_particle_state", "numerical_particle_state", "target_geometry",
+                    "target_probe_velocity_m_s", "numerical_probe_velocity_m_s",
+                    "target_probe_vorticity_s_inv", "numerical_probe_vorticity_s_inv")
+        missing = [(row.get("step"), key) for row in rows for key in required if key not in row]
+        if missing:
+            raise RuntimeError(f"incomplete coupled target/numerical fluid history; missing {missing[:8]}")
+        stage_files = list((output / "fluid").glob("*_mms_rk3_stage_history.csv"))
+        stage_rows = stage_files[0].read_text().splitlines()[1:] if stage_files else []
+        observed_stages = {line.split(",", 1)[0] for line in stage_rows if line.strip()}
+        if not {"1", "2", "3"}.issubset(observed_stages):
+            raise RuntimeError("MMS source stage history missing or has fewer than three stage records")
+        stage_norms = []
+        for line in stage_rows:
+            fields = line.split(",")
+            if len(fields) >= 6:
+                stage_norms.extend(float(value) for value in fields[3:6])
+        if not stage_norms or not any(value > 0.0 for value in stage_norms):
+            raise RuntimeError("MMS source callback ran but emitted only zero source values")
+        if len(rows) > 1 and rows[0]["numerical_particle_state"] == rows[-1]["numerical_particle_state"]:
+            raise RuntimeError("numerical fixed-population state did not evolve across physical times")
+        coupling_history = output / "coupling" / "coupling" / "forces_sent_received_history.jsonl"
+        if not coupling_history.is_file() or not coupling_history.read_text().strip():
+            raise RuntimeError(f"socket timing/transfer history missing: {coupling_history}")
     return rows
 
 
@@ -128,12 +153,17 @@ def main():
     parser.add_argument("--manifest")
     parser.add_argument("--output", default=str(ROOT / "verification/mms/results/coupled"))
     parser.add_argument("--steps", type=int, default=3)
+    parser.add_argument("--dt", type=float, default=SMOKE_DT)
+    parser.add_argument("--n-span", type=int, default=16)
+    parser.add_argument("--nx", type=int, default=8)
+    parser.add_argument("--ny", type=int, default=16)
     args = parser.parse_args()
     from coupled_target import build_default_target, write_manifest
     manifest = Path(args.manifest) if args.manifest else Path(args.output) / "target.json"
     if not args.manifest:
-        write_manifest(build_default_target(args.config_dir, args.steps * SMOKE_DT), manifest)
-    rows = run_case(manifest, args.output, args.steps, config_dir=args.config_dir)
+        write_manifest(build_default_target(args.config_dir, args.steps * args.dt, args.n_span), manifest)
+    rows = run_case(manifest, args.output, args.steps, config_dir=args.config_dir,
+                    dt=args.dt, n_span=args.n_span, nx=args.nx, ny=args.ny)
     solid_rows = []
     import csv
     with open(Path(args.output) / "solid_mms_history.csv", newline="", encoding="utf-8") as stream:
@@ -144,6 +174,11 @@ def main():
         "scope": "fixed-population coupled discrete-model MMS; no lifecycle or convergence claim",
         "steps": len(rows),
         "target_force_history_present": all("target_force" in r for r in rows),
+        "target_and_numerical_particle_history_present": all(
+            "target_particle_state" in r and "numerical_particle_state" in r for r in rows),
+        "fixed_physical_probe_velocity_vorticity_present": all(
+            "target_probe_velocity_m_s" in r and "numerical_probe_velocity_m_s" in r and
+            "target_probe_vorticity_s_inv" in r and "numerical_probe_vorticity_s_inv" in r for r in rows),
         "target_circulation_history_present": all("target_bound_circulation" in r for r in rows),
         "target_circulation_residual_max": max(r["target_circulation_residual"] for r in rows),
         "particle_position_error_l2": [r["particle_state_error"]["position_l2"] for r in rows],
@@ -153,6 +188,8 @@ def main():
         "panel_force_error_l2": [sum((float(a)-float(b))**2
             for ar,br in zip(r["force"],r["target_force"]) for a,b in zip(ar,br))**0.5 for r in rows],
         "fixed_grid_velocity_error_l2": [r["fixed_grid_velocity_error_l2"] for r in rows],
+        "fixed_probe_velocity_error_l2": [r["fixed_probe_velocity_error_l2"] for r in rows],
+        "fixed_probe_vorticity_error_l2": [r["fixed_probe_vorticity_error_l2"] for r in rows],
         "geometry_cp_error_l2": [r["geometry_cp_error_l2"] for r in rows],
         "structural_state_error_l2": [float(r["state_error_l2"]) for r in solid_rows],
         "structural_source_l2": [float(r["source_l2"]) for r in solid_rows],
@@ -160,6 +197,13 @@ def main():
         "geometry_transfer_relative_error": [r.get("geometry_transfer_relative_error") for r in coupling_rows],
         "fluid_solid_stage_times_s": [[r.get("fluid_time_s"), r.get("solid_time_s")] for r in coupling_rows],
         "physical_times_s": [r["fluid_time_s"] for r in rows],
+        "error_norm_definitions": {
+            "particle_state_error_l2": "raw Euclidean norm over all target particles and components at each physical time",
+            "bound_circulation_error_l2": "raw Euclidean norm over bound panels at each physical time",
+            "panel_force_error_l2": "raw Euclidean norm over panel force vectors at each physical time",
+            "fixed_probe_*_error_l2": "raw Euclidean norm over fixed probes and three vector components at each physical time",
+            "relative_norm": "not yet computed in this smoke summary; refinement driver reports space-time relative L2 against the analytic target",
+        },
         "fluid_history": str(next((Path(args.output) / "fluid").glob("*_force_payload_history.jsonl"))),
     }
     Path(args.output, "mms_summary.json").write_text(json.dumps(summary, indent=2) + "\n")

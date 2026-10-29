@@ -233,7 +233,7 @@ def _read_yaml(path):
         return yaml.safe_load(stream)
 
 
-def build_default_target(config, T):
+def build_default_target(config, T, n_span_override=None):
     """Build one deterministic dynamic target from a config directory or map."""
     if isinstance(config, (str, Path)):
         config = Path(config)
@@ -252,7 +252,7 @@ def build_default_target(config, T):
         "theta_y": {"amplitude": -1.0e-3, "omega": omega, "mode": "ramp"},
     }
     structural = StructuralTarget(Lx, Ly, components)
-    n_span = int(coupling.get("comm_nspan", fluid.get("n_span", 80)))
+    n_span = int(n_span_override or coupling.get("comm_nspan", fluid.get("n_span", 80)))
     eta = (np.arange(n_span) + 0.5) / n_span
     y_stations = eta * Ly
     # A small, deterministic, fixed population remains in the downstream wake.

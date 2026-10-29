@@ -38,13 +38,28 @@ def main():
         raise AssertionError(f"source path inactive: constant={const_norm}, target={target_norm}")
     if not all("target_force" in row for row in target):
         raise AssertionError("target aerodynamic history is missing")
-    errors = [row["particle_state_error"]["position_l2"] for row in target]
-    if not any(error > 1e-12 for error in errors):
-        raise AssertionError("numerical particle state was replaced by the target")
+    stage_files = list((out / "target" / "fluid").glob("*_mms_rk3_stage_history.csv"))
+    if not stage_files:
+        raise AssertionError("target source callback history was not emitted")
+    stage_rows = [row for row in stage_files[0].read_text().splitlines()[1:] if row.strip()]
+    if len(stage_rows) < 3:
+        raise AssertionError("target source was not evaluated at all RK3 stages")
+    if not {"1", "2", "3"}.issubset({row.split(",", 1)[0] for row in stage_rows}):
+        raise AssertionError("target source history is missing one or more production RK3 stages")
+    if not all("numerical_particle_state" in row and "target_particle_state" in row for row in target):
+        raise AssertionError("independent target and numerical particle histories are missing")
+    # Numerical evolution is checked independently of target error: an exact
+    # match is allowed. Require finite, changing numerical states and active
+    # source rows rather than relying on a nonzero truncation error.
+    numeric_states = [row["numerical_particle_state"]["position"] for row in target]
+    if len(numeric_states) > 1 and numeric_states[0] == numeric_states[-1]:
+        raise AssertionError("numerical particle state did not evolve between physical times")
     if [r["cl"] for r in constant] == [r["cl"] for r in target]:
         raise AssertionError("constant and target source histories are identical")
     result = {"constant_source_rms": const_norm, "target_source_rms": target_norm,
-              "target_particle_position_error_l2": errors,
+              "target_particle_position_error_l2": [row["particle_state_error"]["position_l2"] for row in target],
+              "target_source_stage_rows": len(stage_rows),
+              "numerical_particle_evolution_observed": True,
               "constant_vs_target_cl_differ": True}
     (out / "G0.json").write_text(json.dumps(result, indent=2) + "\n")
     print("PASS G0 checks_manifest_loading.py", json.dumps(result))

@@ -6,19 +6,29 @@ the stage velocity; circulation and core-width residuals enter the matching
 low-storage RK accumulators after the native stage map.
 """
 
-struct MMSRK3StateSource{S,T}
+struct MMSRK3StateSource{S,T,I}
     source!::S
     stage_trace::T
+    initialize!::I
 end
 
+MMSRK3StateSource(source!, trace; initialize! = (_pf)->nothing) =
+    MMSRK3StateSource{typeof(source!),typeof(trace),typeof(initialize!)}(source!, trace, initialize!)
+
 (adapter::MMSRK3StateSource)(pfield, dt; relax=false, custom_UJ=nothing) =
-    rungekutta3_with_state_source(
+    (adapter.initialize!(pfield); rungekutta3_with_state_source(
         pfield, dt, adapter.source!; relax=relax, custom_UJ=custom_UJ,
         stage_trace=adapter.stage_trace,
-    )
+    ))
 
-function mms_source_components(source!, particle, stage_time, particle_id)
-    value = if applicable(source!, particle, stage_time, particle_id)
+function mms_source_components(source!, particle, stage_time, particle_id, pfield=nothing,
+                               stage_a=nothing, stage_b=nothing, dt=nothing)
+    value = if applicable(source!, particle, stage_time, particle_id, pfield,
+                          stage_a, stage_b, dt)
+        source!(particle, stage_time, particle_id, pfield, stage_a, stage_b, dt)
+    elseif applicable(source!, particle, stage_time, particle_id, pfield)
+        source!(particle, stage_time, particle_id, pfield)
+    elseif applicable(source!, particle, stage_time, particle_id)
         source!(particle, stage_time, particle_id)
     else
         source!(particle, stage_time)
@@ -42,7 +52,7 @@ function rungekutta3_with_state_source(pfield, dt, source!;
     t0 = Float64(pfield.t)
     stage_sources = Vector{Any}(undef, vpm.get_np(pfield))
 
-    function uj_with_mms_source!(pf; kwargs...)
+    function uj_with_mms_source!(pf; a, b, kwargs...)
         uj = isnothing(custom_UJ) ? pf.UJ : custom_UJ
         uj(pf; kwargs...)
         stage[] += 1
@@ -52,19 +62,24 @@ function rungekutta3_with_state_source(pfield, dt, source!;
         source_norm_sq = 0.0
         circulation_source_norm_sq = 0.0
         core_source_norm_sq = 0.0
+        source_values = Any[]
         for i in 1:vpm.get_np(pf)
             particle = vpm.get_particle(pf, i)
             if vpm.is_static(particle)
                 stage_sources[i] = nothing
                 continue
             end
-            source = mms_source_components(source!, particle, stage_time, i)
+            source = mms_source_components(source!, particle, stage_time, i, pf, a, b, dt)
             length(source.position) == 3 || error("MMS position source must return a 3-vector")
             length(source.circulation) == 3 || error("MMS circulation source must return a 3-vector")
             all(isfinite, source.position) || error("MMS position source returned non-finite values")
             all(isfinite, source.circulation) || error("MMS circulation source returned non-finite values")
             isfinite(source.core) || error("MMS core source returned a non-finite value")
             stage_sources[i] = source
+            push!(source_values, Dict("particle_slot"=>i,
+                "position"=>Float64.(source.position),
+                "circulation"=>Float64.(source.circulation),
+                "core"=>Float64(source.core)))
             source_norm_sq += sum(abs2, source.position)
             circulation_source_norm_sq += sum(abs2, source.circulation)
             core_source_norm_sq += abs2(source.core)
@@ -75,6 +90,7 @@ function rungekutta3_with_state_source(pfield, dt, source!;
             position_source_l2_norm=sqrt(source_norm_sq),
             circulation_source_l2_norm=sqrt(circulation_source_norm_sq),
             core_source_l2_norm=sqrt(core_source_norm_sq),
+            source_values=source_values,
         ))
         return nothing
     end
@@ -93,7 +109,8 @@ function rungekutta3_with_state_source(pfield, dt, source!;
     zeta0 = pfield.kernel.zeta(0.0)
     for (a, b) in ((0.0, 1/3), (-5/9, 15/16), (-153/128, 8/15))
         pfield.SFS(pfield, vpm.BeforeUJ(); a=a, b=b)
-        uj_with_mms_source!(pfield; reset_sfs=vpm.isSFSenabled(pfield.SFS), reset=true,
+        uj_with_mms_source!(pfield; a=a, b=b,
+                           reset_sfs=vpm.isSFSenabled(pfield.SFS), reset=true,
                            sfs=vpm.isSFSenabled(pfield.SFS))
         pfield.SFS(pfield, vpm.AfterUJ(); a=a, b=b)
         vpm.update_particle_states(pfield, a, b, dt, Uinf, f, g, zeta0)
@@ -134,6 +151,49 @@ end
 # callable adapter and cannot satisfy that identity check. This narrow method
 # reproduces the installed RK3 core update (including its scheduled reset and
 # strength remap) for fields registered with this adapter.
+function mms_core_zeta_fmm!(pfield)
+    """Evaluate FLOWVPM's installed zeta FMM with its required source flag.
+
+    Formulation section: "Core spreading and remapping are handled as
+    actually implemented". FLOWVPM 4.x calls the FastMultipole tree
+    constructor without the required `target=false` positional flag; this
+    adapter supplies that flag and preserves the installed direct-list zeta
+    accumulation and downstream RBF remap.
+    """
+    options = pfield.fmm
+    leaf_size, shrink_recenter = options.ncrit, options.shrink_recenter
+    acceptance = options.theta
+    zeta = pfield.kernel.zeta
+    tree = vpm.FastMultipole.Tree((pfield,), false; leaf_size, shrink_recenter)
+    _, direct_list = vpm.FastMultipole.build_interaction_lists(
+        tree.branches, tree.branches, leaf_size, acceptance, false, true, true
+    )
+    sort_index = tree.sort_index_list[1]
+    for (i_target, i_source) in direct_list
+        target_branch, source_branch = tree.branches[i_target], tree.branches[i_source]
+        for i_source_particle in source_branch.bodies_index[1]
+            source = vpm.get_particle(pfield, sort_index[i_source_particle])
+            source_x = vpm.get_X(source)
+            source_gamma = vpm.get_Gamma(source)
+            for i_target_particle in target_branch.bodies_index[1]
+                target = vpm.get_particle(pfield, sort_index[i_target_particle])
+                target_x = vpm.get_X(target)
+                dx = source_x[1]-target_x[1]
+                dy = source_x[2]-target_x[2]
+                dz = source_x[3]-target_x[3]
+                r = sqrt(dx*dx + dy*dy + dz*dz)
+                target_sigma = vpm.get_sigma(target)[]
+                zeta_sigma = zeta(r/target_sigma) / target_sigma^3
+                J = vpm.get_J(source)
+                J[1] += source_gamma[1]*zeta_sigma
+                J[2] += source_gamma[2]*zeta_sigma
+                J[3] += source_gamma[3]*zeta_sigma
+            end
+        end
+    end
+    return nothing
+end
+
 function vpm.viscousdiffusion(
     pfield::vpm.ParticleField{R,F,V,U,S,K,J,I,L,N},
     scheme::vpm.CoreSpreading,
@@ -157,7 +217,11 @@ function vpm.viscousdiffusion(
         scheme.t_sgm += dt
         beta_cur = sqrt(2 * scheme.nu * scheme.t_sgm / scheme.sgm0^2 + 1)
         if beta_cur >= scheme.beta
-            scheme.zeta(pfield)
+            if scheme.zeta === vpm.zeta_fmm
+                mms_core_zeta_fmm!(pfield)
+            else
+                scheme.zeta(pfield)
+            end
             for p in vpm.iterator(pfield)
                 for i in 1:3
                     vpm.get_M(p)[6+i] = vpm.get_J(p)[i]
