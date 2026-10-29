@@ -1,0 +1,13 @@
+Measured timing definitions
+==========================
+force_transfer_apply_time: fluid CP/panel loads -> solid nodal loads only.
+geometry_transfer_apply_time: solid interface displacement -> fluid LE/TE geometry only.
+solid_solve_time: nonlinear structural solve only.
+solid_io_time: solid field-output writes only.
+solid_step_time: broad solid-side post-receive work; not a pure solver time.
+fluid_step_time: force/diagnostic work inside the coupling callback, excluding socket exchange.
+fluid_advance_between_callbacks_time: elapsed work outside consecutive callbacks; it is the closest
+available proxy for fluid advancement, but may include framework/output overhead.
+fluid_interstep_time is deliberately excluded: it is elapsed time between callback starts, not communication latency.
+wait_for_* fields are scheduler-stage durations. They include peer computation and blocking I/O and are
+not pure network latency. Pure one-way latency needs synchronized endpoint clocks or packet-level tracing.
