@@ -5,9 +5,9 @@
 **Overall status: PARTIAL.** The repository has a structural plate MMS,
 symbolic identities, a production weak/strong structural check, a discrete
 FLOWVLM circulation component reference, and production transfer diagnostics.
-It does not yet have a consistent rVPM manufactured source for the complete
-particle state, a time-dependent circulation/force target, or a socket-coupled
-dynamic FSI MMS. No component result is a full-FSI pass.
+It does not yet derive rVPM stage sources from a coupled target trajectory, or
+provide a time-dependent circulation/force target and socket-coupled dynamic
+FSI MMS. No component result is a full-FSI pass.
 
 ### Run Commands
 
@@ -24,7 +24,7 @@ environment; the standalone fluid study needs the Julia project used by
 | `conda run -n fenics-env python verification/mms/refinement.py --study spatial --execute --formulation nonlinear --output-dir /tmp/plate-spatial` | Five-level structural spatial refinement. Use `--study temporal` for six time steps on a fixed `48x128` mesh. The temporal series is expensive; do not assume it diagnoses the previously observed error floor without same-mesh time-reference checks. |
 | `conda run -n fenics-env python verification/mms/transfer_moving_interface.py --config-dir config --levels 8x16,12x24 --csv /tmp/transfer.csv --json /tmp/transfer.json` | Calls production CRM/RBF transfer methods at undeformed and two deformed states on each mesh, with constant and varying forces; emits component-only geometry, resultant, moment, and work metrics. |
 | `conda run -n fenics-env bash -lc 'LD_LIBRARY_PATH="$CONDA_PREFIX/lib" julia --project=.. verification/mms/circulation_reference_check.jl'` | Rebuilds the FLOWVLM horseshoe influence matrix and no-penetration RHS independently, compares the circulation with the installed solve, and checks a manufactured discrete circulation vector. Shares the installed vortex kernel; static geometry only. |
-| `julia --project=.. verification/mms/particle_position_stage_check.jl` | Fixed-population component check of the native rVPM RK3 position update with a constant source and a zero-source regression. This does not verify circulation/core evolution or native wake lifecycle. |
+| `julia --project=.. verification/mms/particle_position_stage_check.jl` | Fixed-population component check of constant position, circulation, and core-width RK3 sources, zero-source equivalence, and native CoreSpreading. Does not verify target-derived sources or wake lifecycle. |
 | `julia --project=PATH_TO_FLOWUNSTEADY verification/mms/run_refinement.jl --study particles --execute` | Standalone FLOWUnsteady/rVPM sensitivity run, not particle MMS and not coupled FSI. Each case records config and particle-count observations under its results folder. `analyze.py` compares histories against a numerical reference, not an exact solution. |
 
 The recent corrected structural spatial run used nonlinear production settings,
@@ -39,18 +39,38 @@ time-integrated error floor near `0.289` has not been resolved by a same-mesh
 fine-step comparison; no temporal plate rate is claimed. To preserve existing
 outputs, send new refinement runs to a fresh `--output-dir`.
 
-The project-owned `fluid/src/mms_rk3.jl` wraps the installed RK3 routine and
-adds an opt-in source to the particle-position RHS at the native stages
-`t`, `t+dt/3`, and `t+3dt/4`. The production solver enables this component hook
-only when `VARFLEXI_MMS_POSITION_SOURCE="sx,sy,sz"` is set; values are constant
-source velocities in m/s. The default path passes `vpm.rungekutta3` unchanged.
-Enabled runs write `*_mms_rk3_stage_history.csv`; the source hook requires
-`vpm_sfs=none` so it cannot leak into subfilter-scale strength evolution. The
-fixed-population regression reports zero position error for constant velocity
-forcing and zero complete-particle-state difference against native RK3 when
-the source is zero. This hook manufactures only particle position evolution; it does not supply compatible sources for
-circulation, core width, shedding, particle birth/removal, force, or structure.
-It is not a coupled or complete rVPM MMS.
+The project-owned `fluid/src/mms_rk3.jl` provides an opt-in source callback for
+particle position, circulation, and core width at the native RK3 stages
+`t`, `t+dt/3`, and `t+3dt/4`. Set
+`VARFLEXI_MMS_STATE_SOURCE="sx,sy,sz,gx,gy,gz,ssigma"` for constant source
+components (position in m/s, circulation in strength/s, and core width in
+m/s), or retain the position-only `VARFLEXI_MMS_POSITION_SOURCE="sx,sy,sz"`
+form. The stage routine uses FLOWVPM's production particle-state update and
+core-spreading remap; a narrow dispatch preserves CoreSpreading's RK3 path
+when a callable adapter is registered. The default path still passes
+`vpm.rungekutta3` unchanged. Enabled runs write stage-specific source norms to
+`*_mms_rk3_stage_history.csv` and require `vpm_sfs=none`. The fixed-population
+component verifies constant sources for all three state groups, zero-source
+equivalence to native RK3, and native core spreading. These constant-source
+checks do not derive residuals from a coupled target, cover variable particle
+populations, or verify circulation/force/structure through the socket path.
+
+The production socket diagnostics now retain each numerical bound-circulation
+vector, particle count, fluid and solid physical times, and the three rVPM
+source-stage times/norms when the hook is enabled. This adds state chronology
+to the existing force/geometry transfer logs; target errors are unavailable
+until a target trajectory is wired into both solvers.
+
+An isolated two-step socket smoke run completed through the Python coupling
+server, FEniCS solid, and Julia/FLOWUnsteady client with the RK3 adapter
+registered. It is not an end-to-end MMS result: its startup particles were
+static, the recorded source norms were zero, no analytic target or manufactured
+structural load was present, and the run used a temporary
+`VARFLEXI_CORE_SPREADING_BETA=2.0` setting to avoid a short-run core reset. The
+run also exposed and fixed a CRM audit indexing issue: force moments must use
+the CG1 coordinates ordered with the CRM force vector, rather than the P2
+structural sampling coordinates. A source-active, target-comparing socket
+integration test remains unimplemented.
 
 `PlateMMS.target_derivatives` is the canonical symbolic derivative collection
 for the structural target. `PlateMMS.velocities` and `.accelerations` are used
@@ -60,10 +80,12 @@ them (plus first spatial derivatives) against centered finite differences.
 The current Julia solver uses FLOWVLM's discrete horseshoe-vortex
 no-penetration solve coupled to FLOWVPM/rVPM, not an actuator-line model. The
 installed RK3 stages advance particle positions and circulation; core
-spreading is a separate staged update and can remap particle strengths.
-Native shedding, birth, core evolution, and removal are event-bearing
-operations. There is no verification source hook at those stages and no
-immutable particle event ledger matched against manufactured lifetimes.
+spreading is a separate staged update and can remap particle strengths. The
+new source callback covers additive fixed-population position, circulation,
+and core-width residuals, but production setup currently exposes constant
+sources only. Native shedding, birth, core reset/remap, and removal are
+event-bearing operations. There is no immutable particle event ledger matched
+against manufactured lifetimes.
 Therefore neither the Taylor-Green continuum identity (also unavailable when
 `fluid.py` is absent) nor the standalone particle sensitivity driver verifies
 the production particle equations.

@@ -635,7 +635,16 @@ class StructuralSolver:
                 ) = self.transfer.wrench_transfer_metrics(
                     self.cp_targets,
                     forces_eff * self.A_diag[:, None],
-                    self.interface_coords,
+                    (
+                        np.column_stack(
+                            (
+                                self.transfer.crm_backend.force_dof_coords,
+                                np.zeros(self.transfer.crm_backend.force_dof_coords.shape[0]),
+                            )
+                        )
+                        if self.force_transfer_mode == "crm"
+                        else self.interface_coords
+                    ),
                     nodal_forces,
                     epsilon_reg=self.epsilon_reg,
                 )
@@ -791,6 +800,7 @@ class StructuralSolver:
                 msg_geo = json.dumps(
                     {
                         "step": i_step + 1,
+                        "solid_time_s": float(self.time[i_step + 1]),
                         "dt": self.dt_value,
                         "ttot": self.T,
                         "nsteps": self.Nsteps,

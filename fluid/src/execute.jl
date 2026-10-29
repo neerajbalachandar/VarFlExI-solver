@@ -36,12 +36,12 @@ uns.run_simulation(simulation, nsteps;
     save_horseshoes=save_horseshoes
 )
 
-if mms_position_source_enabled
+if mms_state_source_enabled
     mms_stage_path = joinpath(save_path, run_name * "_mms_rk3_stage_history.csv")
     open(mms_stage_path, "w") do io
-        println(io, "stage,time_s,particle_count,position_source_l2_norm_m_per_s")
+        println(io, "stage,time_s,particle_count,position_source_l2_norm_m_per_s,circulation_source_l2_norm_strength_per_s,core_source_l2_norm_m_per_s")
         for row in mms_rk3_stage_trace
-            println(io, "$(row.stage),$(row.time),$(row.particle_count),$(row.source_l2_norm)")
+            println(io, "$(row.stage),$(row.time),$(row.particle_count),$(row.position_source_l2_norm),$(row.circulation_source_l2_norm),$(row.core_source_l2_norm)")
         end
     end
     println("MMS RK3 stage history: $mms_stage_path")

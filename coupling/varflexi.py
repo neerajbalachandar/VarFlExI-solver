@@ -2,6 +2,7 @@ import argparse
 import csv
 import errno
 import json
+import math
 import os
 import socket
 from dataclasses import dataclass
@@ -355,6 +356,10 @@ class VarFlExICoupler:
                     "solid_step_time",
                     "fluid_step_time",
                     "fluid_interstep_time",
+                    "solid_time_s",
+                    "fluid_time_s",
+                    "particle_count",
+                    "bound_circulation_l2_norm",
                 ]
             )
 
@@ -399,6 +404,22 @@ class VarFlExICoupler:
                 force_data = self.read_json_line(fluid_file, "Fluid")
                 forces = vector_rows(force_data.get("force", []), "force")
                 self.validate_force_payload(force_data, forces, step)
+                bound_circulation = force_data.get("bound_circulation")
+                if bound_circulation is not None:
+                    if not isinstance(bound_circulation, list) or len(bound_circulation) != len(forces):
+                        raise RuntimeError(
+                            f"Bound-circulation payload length mismatch at step {step}: "
+                            f"received {len(bound_circulation) if isinstance(bound_circulation, list) else 'non-list'}, "
+                            f"expected {len(forces)}"
+                        )
+                    bound_circulation = [float(value) for value in bound_circulation]
+                    if not all(math.isfinite(value) for value in bound_circulation):
+                        raise RuntimeError(f"Non-finite bound circulation at step {step}")
+                particle_count = force_data.get("particle_count")
+                if particle_count is not None:
+                    particle_count = int(particle_count)
+                    if particle_count < 0:
+                        raise RuntimeError(f"Negative particle count at step {step}")
                 print("Forces received.")
 
                 forces_received_raw = [row[:] for row in forces]
@@ -497,8 +518,19 @@ class VarFlExICoupler:
                     {
                         "step": step,
                         "time": time_value,
+                        "solid_time_s": optional_float(geo_data, "solid_time_s"),
+                        "fluid_time_s": optional_float(force_data, "fluid_time_s"),
+                        "particle_count": particle_count,
+                        "bound_circulation": bound_circulation,
+                        "rVPM_RK3_stage_times_s": force_data.get("rVPM_RK3_stage_times_s", []),
+                        "rVPM_RK3_stage_source_norms": force_data.get("rVPM_RK3_stage_source_norms", []),
+                        "bound_circulation_l2_norm": math.sqrt(
+                            sum(value * value for value in bound_circulation or [])
+                        ),
                         "n_span": force_data.get("n_span"),
                         "n_chord": force_data.get("n_chord"),
+                        "bound_circulation": force_data.get("bound_circulation"),
+                        "particle_count": force_data.get("particle_count"),
                         "indexing": force_data.get("indexing", "span-major"),
                         "force_relax_used": relax_used,
                         "force_residual": force_residual,
@@ -584,6 +616,10 @@ class VarFlExICoupler:
                         f"{solid_step_time:.6e}" if solid_step_time == solid_step_time else "nan",
                         f"{fluid_step_time:.6e}" if fluid_step_time == fluid_step_time else "nan",
                         f"{fluid_interstep_time:.6e}" if fluid_interstep_time == fluid_interstep_time else "nan",
+                        f"{optional_float(geo_data, 'solid_time_s'):.6e}" if optional_float(geo_data, "solid_time_s") == optional_float(geo_data, "solid_time_s") else "nan",
+                        f"{optional_float(force_data, 'fluid_time_s'):.6e}" if optional_float(force_data, "fluid_time_s") == optional_float(force_data, "fluid_time_s") else "nan",
+                        particle_count if particle_count is not None else "",
+                        f"{math.sqrt(sum(value * value for value in bound_circulation or [])):.6e}",
                     ]
                 )
 

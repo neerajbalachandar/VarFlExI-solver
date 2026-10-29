@@ -93,6 +93,16 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     cl = lift / denom
     cd = drag / denom
     fluid_step_time = (time_ns() - step_start_ns) / 1.0e9
+    rk3_source_stages = mms_state_source_enabled && length(mms_rk3_stage_trace) >= 3 ?
+                        last(mms_rk3_stage_trace, 3) : NamedTuple[]
+    rk3_stage_times = Float64[row.time for row in rk3_source_stages]
+    rk3_stage_source_norms = [
+        Dict(
+            "position_l2_norm" => row.position_source_l2_norm,
+            "circulation_l2_norm" => row.circulation_source_l2_norm,
+            "core_l2_norm" => row.core_source_l2_norm,
+        ) for row in rk3_source_stages
+    ]
     push!(lift_hist, lift)
     push!(drag_hist, drag)
     push!(cl_hist, cl)
@@ -104,9 +114,14 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         force_trace_io,
         JSON.json(Dict(
             "step" => step,
+            "fluid_time_s" => Float64(T),
             "n_span" => m_span,
             "n_chord" => 1,
             "indexing" => "span-major",
+            "bound_circulation" => Float64.(gamma_w),
+            "particle_count" => np,
+            "rVPM_RK3_stage_times_s" => rk3_stage_times,
+            "rVPM_RK3_stage_source_norms" => rk3_stage_source_norms,
             "force" => force_out,
             "particles" => np,
             "lift" => lift,
@@ -126,9 +141,14 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
 
     write(sock, JSON.json(Dict(
         "step" => step,
+        "fluid_time_s" => Float64(T),
         "n_span" => m_span,
         "n_chord" => 1,
         "indexing" => "span-major",
+        "bound_circulation" => Float64.(gamma_w),
+        "particle_count" => np,
+        "rVPM_RK3_stage_times_s" => rk3_stage_times,
+        "rVPM_RK3_stage_source_norms" => rk3_stage_source_norms,
         "dt" => dt,
         "ttot" => ttot,
         "eta_span" => eta_span_force_payload,

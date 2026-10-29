@@ -77,30 +77,44 @@ wing = make_cantilever_template(
 )
 wing_ref = deepcopy(wing)
 
-# Optional verification hook: add a constant manufactured velocity source to
-# the particle position equation at each native rVPM RK3 stage. Normal runs
-# retain FLOWVPM.rungekutta3 directly and do not enter this branch.
+# Optional verification hook: add constant manufactured sources to particle
+# position, circulation, and core-width equations at each native rVPM RK3
+# stage. Normal runs retain FLOWVPM.rungekutta3 directly.
+mms_state_source_text = strip(get(ENV, "VARFLEXI_MMS_STATE_SOURCE", ""))
 mms_position_source_text = strip(get(ENV, "VARFLEXI_MMS_POSITION_SOURCE", ""))
-mms_position_source_enabled = !isempty(mms_position_source_text)
+!isempty(mms_state_source_text) && !isempty(mms_position_source_text) && error(
+    "Set only one of VARFLEXI_MMS_STATE_SOURCE and VARFLEXI_MMS_POSITION_SOURCE"
+)
+mms_source_text = isempty(mms_state_source_text) ? mms_position_source_text : mms_state_source_text
+mms_state_source_enabled = !isempty(mms_source_text)
 mms_rk3_stage_trace = NamedTuple[]
-if !mms_position_source_enabled
+if !mms_state_source_enabled
     vpm_integration = vpm.rungekutta3
 else
     lowercase(strip(solver_cfg.vpm_sfs)) in ("none", "off", "false") || error(
         "The particle-position MMS component requires vpm_sfs=none so its position source cannot enter SFS strength evolution"
     )
-    mms_position_source = parse.(Float64, split(mms_position_source_text, ','))
-    length(mms_position_source) == 3 || error(
-        "VARFLEXI_MMS_POSITION_SOURCE must contain three comma-separated values in m/s"
-    )
-    all(isfinite, mms_position_source) || error("MMS position source must be finite")
-    mms_source! = (_particle, _stage_time) -> mms_position_source
-    vpm_integration = (pfield, step_dt; relax=false, custom_UJ=nothing) ->
-        rungekutta3_with_position_source(
-            pfield, step_dt, mms_source!; relax=relax, custom_UJ=custom_UJ,
-            stage_trace=mms_rk3_stage_trace
+    mms_source_values = parse.(Float64, split(mms_source_text, ','))
+    if !isempty(mms_state_source_text)
+        length(mms_source_values) == 7 || error(
+            "VARFLEXI_MMS_STATE_SOURCE must contain 7 comma-separated values: " *
+            "position source (3 m/s), circulation source (3 strength/s), core-width source (m/s)"
         )
-    println("Opt-in particle position MMS source active: $(mms_position_source) m/s")
+        mms_source = (
+            position=mms_source_values[1:3],
+            circulation=mms_source_values[4:6],
+            core=mms_source_values[7],
+        )
+    else
+        length(mms_source_values) == 3 || error(
+            "VARFLEXI_MMS_POSITION_SOURCE must contain three comma-separated values in m/s"
+        )
+        mms_source = (position=mms_source_values, circulation=zeros(3), core=0.0)
+    end
+    all(isfinite, mms_source_values) || error("MMS state source must be finite")
+    mms_source! = (_particle, _stage_time) -> mms_source
+    vpm_integration = MMSRK3StateSource(mms_source!, mms_rk3_stage_trace)
+    println("Opt-in rVPM RK3 state source active: $(mms_source)")
 end
 
 polar_path = isempty(solver_cfg.section_polar_path) ? nothing : solver_cfg.section_polar_path
@@ -181,8 +195,12 @@ vpm_fmm_settings = vpm.FMM(
     min_ncrit=wake_cfg.fmm_minimum_ncrit
 )
 
+core_spreading_beta = parse(Float64, get(ENV, "VARFLEXI_CORE_SPREADING_BETA", "1.0"))
+isfinite(core_spreading_beta) && core_spreading_beta > 0 || error(
+    "VARFLEXI_CORE_SPREADING_BETA must be finite and positive"
+)
 vpm_viscous = wake_cfg.viscous_scheme == "CoreSpreading" ?
-              vpm.CoreSpreading(nu, sigma_vpm_overwrite, 1.0) :
+              vpm.CoreSpreading(nu, sigma_vpm_overwrite; beta=core_spreading_beta) :
               nothing
 vpm_sfs = configured_vpm_sfs(solver_cfg.vpm_sfs)
 

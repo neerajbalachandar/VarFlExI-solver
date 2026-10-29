@@ -6,6 +6,12 @@ class CommonRefinementMesh:
     def __init__(self, domain, eta_span_comm):
         self.domain = domain
         self.eta_span_comm = np.asarray(eta_span_comm, dtype=float).reshape(-1)
+        # The CRM force vector is ordered by this CG1 space's dof map. Keep
+        # the matching coordinates beside it for force and moment audits;
+        # the structural solver's P2 interface coordinates have a different
+        # size and ordering.
+        self.force_space = FunctionSpace(domain.mesh, "CG", 1)
+        self.force_dof_coords = self.force_space.tabulate_dof_coordinates().reshape((-1, 2)).copy()
 
     @staticmethod
     def polygon_area(poly):

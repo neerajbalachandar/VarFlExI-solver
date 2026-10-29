@@ -280,7 +280,7 @@ def main():
             raise
     tests["full_rvpm_equation_mms"] = {
         "status": "NOT_IMPLEMENTED",
-        "reason": "Only a fixed-population position-equation stage source is implemented. Gamma, core-width evolution, target shedding/births, removal events, and target circulation/forces do not yet have manufactured sources.",
+        "reason": "The fixed-population RK3 adapter now accepts position, circulation, and core-width source components and retains native CoreSpreading. Production configuration exposes constant sources only; target-residual construction, lifecycle events, circulation/force targets, and coupled verification remain unimplemented.",
     }
     tests["fenics_plate_discrete_convergence"] = {
         "status": "NOT_RUN",
@@ -296,9 +296,9 @@ def main():
         "command": "conda run -n fenics-env python verification/mms/jacobian_check.py",
         "reason": "Requires legacy DOLFIN; finite-differences the complete production residual against its UFL tangent.",
     }
-    tests["rVPM_particle_position_stage_component"] = {
+    tests["rVPM_particle_state_stage_component"] = {
         "status": "NOT_RUN",
-        "reason": "Not run by this Python suite; it exercises the native RK3 stage adapter on a fixed one-particle field.",
+        "reason": "Not run by this Python suite; the separate check exercises fixed-population position, circulation, and core-width sources against native RK3 and CoreSpreading.",
         "command": "julia --project=.. verification/mms/particle_position_stage_check.jl",
     }
     tests["flowvpm_kernel_core_components"] = {
@@ -354,7 +354,7 @@ def main():
         "| RBF resultant and paired virtual work | PASS | Actual local-RBF backend algebra for constant/nonuniform force and nontrivial displacement; moment discrepancy measured, not presumed conserved. |",
         f"| Installed FLOWVLM/FLOWVPM component checks | {tests['flowvpm_kernel_core_components']['status']} | {tests['flowvpm_kernel_core_components'].get('reason', 'See stored component metrics; component-only scope, no wake integration.')} |",
         "| Scalar generalized-alpha continuous-forcing time refinement | PASS | Six-level oscillator test uses the same coefficient/update helpers as the production integrator; see the dedicated CSV for measured orders. |",
-        f"| rVPM position-stage component | {tests['rVPM_particle_position_stage_component']['status']} | {tests['rVPM_particle_position_stage_component']['reason']} |",
+        f"| rVPM particle-state stage component | {tests['rVPM_particle_state_stage_component']['status']} | {tests['rVPM_particle_state_stage_component']['reason']} |",
         "| Full rVPM equation MMS | NOT IMPLEMENTED | Only a fixed-population position source is available; circulation/core and lifecycle sources remain absent. |",
         f"| Discrete FEniCS plate convergence | {tests['fenics_plate_discrete_convergence']['status']} | {tests['fenics_plate_discrete_convergence']['reason']} |",
         "| Production weak form vs independent strong form | NOT RUN | Separate check; use the 12x24 continuous nonlinear command in the JSON summary. |",
