@@ -155,6 +155,13 @@ class VarFlExICoupler:
         self.dt = self.total_time / self.nsteps if self.total_time > 0.0 and self.nsteps > 0 else float("nan")
         self.force_relax = float(cfg_get(self.coupling_params, "force_relax", default=1.0))
         self.geom_relax = float(cfg_get(self.coupling_params, "geom_relax", default=1.0))
+        self.force_change_warning_relative = float(
+            cfg_get(self.coupling_params, "force_change_warning_relative", default=0.5)
+        )
+        self.force_change_warning_interval = max(
+            1, int(cfg_get(self.coupling_params, "force_change_warning_interval", default=20))
+        )
+        self._last_force_change_warning_step = 0
         self.epsilon_reg = float(cfg_get(self.coupling_params, "epsilon_reg", default=1.0e-16))
         self.use_aitken = as_bool(cfg_get(self.coupling_params, "use_aitken", default=False))
         self.debug_io = as_bool(cfg_get(self.coupling_params, "debug_io", default=False))
@@ -435,6 +442,18 @@ class VarFlExICoupler:
                     force_reference_norm,
                     force_relative_error,
                 ) = self.relax_forces(forces)
+                if (
+                    math.isfinite(force_relative_error)
+                    and force_relative_error >= self.force_change_warning_relative
+                    and step - self._last_force_change_warning_step >= self.force_change_warning_interval
+                ):
+                    print(
+                        f"WARNING: force change is large at step {step}: "
+                        f"relative increment={force_relative_error:.3e} "
+                        f"(warning threshold={self.force_change_warning_relative:.3e}); "
+                        "check fluid loads, structural response, and coupling stability"
+                    )
+                    self._last_force_change_warning_step = step
                 force_data["force"] = relaxed_forces
 
                 q_inf = force_data.get("q_inf")

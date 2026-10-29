@@ -151,7 +151,7 @@ end
 # callable adapter and cannot satisfy that identity check. This narrow method
 # reproduces the installed RK3 core update (including its scheduled reset and
 # strength remap) for fields registered with this adapter.
-function mms_core_zeta_fmm!(pfield)
+function production_zeta_fmm_compat!(pfield)
     """Evaluate FLOWVPM's installed zeta FMM with its required source flag.
 
     Formulation section: "Core spreading and remapping are handled as
@@ -160,6 +160,10 @@ function mms_core_zeta_fmm!(pfield)
     adapter supplies that flag and preserves the installed direct-list zeta
     accumulation and downstream RBF remap.
     """
+    # FLOWVPM's stock zeta_fmm calls Tree((pfield,); ...), but the installed
+    # FastMultipole version requires the explicit `target` positional flag.
+    # Empty fields have no remap contributions and need no tree.
+    vpm.get_np(pfield) == 0 && return nothing
     options = pfield.fmm
     leaf_size, shrink_recenter = options.ncrit, options.shrink_recenter
     acceptance = options.theta
@@ -172,22 +176,22 @@ function mms_core_zeta_fmm!(pfield)
     for (i_target, i_source) in direct_list
         target_branch, source_branch = tree.branches[i_target], tree.branches[i_source]
         for i_source_particle in source_branch.bodies_index[1]
-            source = vpm.get_particle(pfield, sort_index[i_source_particle])
-            source_x = vpm.get_X(source)
-            source_gamma = vpm.get_Gamma(source)
+            source_particle = vpm.get_particle(pfield, sort_index[i_source_particle])
+            source_x = vpm.get_X(source_particle)
             for i_target_particle in target_branch.bodies_index[1]
-                target = vpm.get_particle(pfield, sort_index[i_target_particle])
-                target_x = vpm.get_X(target)
+                target_particle = vpm.get_particle(pfield, sort_index[i_target_particle])
+                target_x = vpm.get_X(target_particle)
                 dx = source_x[1]-target_x[1]
                 dy = source_x[2]-target_x[2]
                 dz = source_x[3]-target_x[3]
                 r = sqrt(dx*dx + dy*dy + dz*dz)
-                target_sigma = vpm.get_sigma(target)[]
+                target_sigma = vpm.get_sigma(target_particle)[]
                 zeta_sigma = zeta(r/target_sigma) / target_sigma^3
-                J = vpm.get_J(source)
-                J[1] += source_gamma[1]*zeta_sigma
-                J[2] += source_gamma[2]*zeta_sigma
-                J[3] += source_gamma[3]*zeta_sigma
+                target_gamma = vpm.get_Gamma(target_particle)
+                J = vpm.get_J(source_particle)
+                J[1] += target_gamma[1]*zeta_sigma
+                J[2] += target_gamma[2]*zeta_sigma
+                J[3] += target_gamma[3]*zeta_sigma
             end
         end
     end
@@ -218,7 +222,7 @@ function vpm.viscousdiffusion(
         beta_cur = sqrt(2 * scheme.nu * scheme.t_sgm / scheme.sgm0^2 + 1)
         if beta_cur >= scheme.beta
             if scheme.zeta === vpm.zeta_fmm
-                mms_core_zeta_fmm!(pfield)
+                production_zeta_fmm_compat!(pfield)
             else
                 scheme.zeta(pfield)
             end

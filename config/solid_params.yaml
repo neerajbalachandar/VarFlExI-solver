@@ -19,9 +19,9 @@ q_pvd_filename: plate_state.pvd
 sig_pvd_filename: membrane_stress.pvd
 diag_csv_filename: solid_v18_diagnostics.csv
 
-E: 1.0e7
-nu: 0.30
-rho_s: 1200.0
+E: 7.0e10
+nu: 0.33
+rho_s: 1600.0
 
 eta_m: 1.2
 eta_k: 5.0e-5
@@ -36,9 +36,9 @@ include_quadratic_inplane_strain: true
 alpha_m: 0.1
 alpha_f: 0.2
 
-newton_atol: 1.0e-8
-newton_rtol: 1.0e-6
-newton_maxiter: 20
+newton_atol: 1.0e-6
+newton_rtol: 1.0e-4
+newton_maxiter: 100
 # Exact Newton with Armijo backtracking is the default.  The alternative
 # regularizes the Newton tangent as J + lambda*K_ref after rejected trials.
 nonlinear_solver: newton_linesearch
@@ -50,4 +50,5 @@ regularized_newton_lambda_decay: 0.25
 regularized_newton_max_attempts: 8
 
 # Number of fixed-load continuation stages, not Newton iterations.
-force_ramp_iters: 1
+force_ramp_iters: 10
+newton_max_load_subdivisions: 5

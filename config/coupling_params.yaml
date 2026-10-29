@@ -1,5 +1,5 @@
-total_time: 5.0
-n_steps: 5000
+total_time: 3.0
+n_steps: 9000
 
 host: 127.0.0.1
 port: 9000
@@ -26,6 +26,8 @@ enforce_span_projection: false
 
 force_relax: 0.5
 geom_relax: 0.5
+force_change_warning_relative: 0.5
+force_change_warning_interval: 20
 epsilon_reg: 1.0e-16
 
 debug_io: null

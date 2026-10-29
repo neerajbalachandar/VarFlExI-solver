@@ -3,17 +3,17 @@ particles_per_step: 4
 save_every: 2
 
 aoa_deg: 3.0
-vinf: 25.0
-rho: 1.225
-nu: 1.5e-05
+vinf: 250.0
+rho: 0.38
+nu: 3.76e-05
 
 # V(x,t) = V0 + G*(x-x_ref) + cyclic transverse sinusoidal gust.
 # Gust amplitudes are m/s, wavenumbers are rad/m; this deterministic gust is
 # not a substitute for resolved turbulence or an LES inflow.
 freestream_gradient: [0, 0, 0, 0, 0, 0, 0, 0, 0]
-freestream_oscillation: [2.0, 1.5, 1.0]
-freestream_wavenumber: [2.0, 1.5, 1.0]
-freestream_frequency_hz: 0.7
+freestream_oscillation: [0.0, 0.0, 2.5]
+freestream_wavenumber: [0.7, 0.0, 0.0]
+freestream_frequency_hz: 1.2
 freestream_phase_deg: 0.0
 freestream_reference: [0, 0, 0]
 
@@ -70,7 +70,7 @@ autotune_regularization: false
 default_rho_over_sigma: 1.0
 minimum_ncrit: 3
 
-viscous_scheme: CoreSpreading
+viscous_scheme: none
 vpm_sfs: none
 
 save_directory: results/rect_nonlinear_regime/fluid/

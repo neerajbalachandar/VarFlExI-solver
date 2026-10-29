@@ -88,6 +88,9 @@ class StructuralSolver:
         self.mms_target_path = mms_target_path
         self.mms_output = mms_output
         self.mms_target = None
+        # The residual assembly is shared by ordinary and MMS solves; keep
+        # the optional source unset for normal runs as well as MMS runs.
+        self.mms_rhs_source = None
         self._newton_step_stats = {}
 
         self._setup_simulation_data()
@@ -110,7 +113,6 @@ class StructuralSolver:
             self.model.q_old.assign(_target_function(self.model, self.mms_target, 0.0, 0, self.mms_spaces))
             self.model.v_old.assign(_target_function(self.model, self.mms_target, 0.0, 1, self.mms_spaces))
             self.model.a_old.assign(_target_function(self.model, self.mms_target, 0.0, 2, self.mms_spaces))
-            self.mms_rhs_source = None
             out = self.mms_output or self.out_dir
             os.makedirs(out, exist_ok=True)
             self.mms_history = open(os.path.join(out, "solid_mms_history.csv"), "w", encoding="utf-8")
@@ -241,6 +243,11 @@ class StructuralSolver:
                 default=os.getenv("SOLID_FORCE_RAMP_ITERS", "8"),
             )
         )
+        self.newton_max_load_subdivisions = int(
+            cfg_get(self.solid_config, "newton_max_load_subdivisions", default=5)
+        )
+        if self.newton_max_load_subdivisions < 0:
+            raise ValueError("newton_max_load_subdivisions must be nonnegative")
         self.force_relax = cfg_get(self.coupling_config, "force_relax", default=1.0)
         self.nonlinear_solver = str(
             cfg_get(self.solid_config, "nonlinear_solver", default="newton_linesearch")
@@ -579,21 +586,60 @@ class StructuralSolver:
         )
 
     def _solve_newton_step(self, ext_force_vec):
-        """Solve the step with fixed-load Newton stages and globalization."""
+        """Solve the step with bounded adaptive load continuation.
+
+        A failed continuation stage restores its starting displacement and
+        bisects that load interval. This gives Newton a closer initial guess
+        without changing the physical time step or accepting a nonconverged
+        state.
+        """
         self._newton_stage_stats = []
         n_load_stages = max(1, self.force_ramp_iters)
         regularization_lambda = self.regularized_newton_initial_lambda
-        for stage in range(1, n_load_stages + 1):
-            load_factor = float(stage) / float(n_load_stages)
-            regularization_lambda = self._solve_nonlinear_load_stage(
-                ext_force_vec, load_factor, regularization_lambda
-            )
+        pending = [(float(stage) / float(n_load_stages), 0)
+                   for stage in range(1, n_load_stages + 1)]
+        current_load_factor = 0.0
+        load_subdivisions = 0
+        while pending:
+            load_factor, subdivision_depth = pending.pop(0)
+            stage_start = self.model.q.vector().get_local().copy()
+            try:
+                regularization_lambda = self._solve_nonlinear_load_stage(
+                    ext_force_vec, load_factor, regularization_lambda
+                )
+            except RuntimeError as exc:
+                self.model.q.vector().set_local(stage_start)
+                self.model.q.vector().apply("insert")
+                if subdivision_depth >= self.newton_max_load_subdivisions:
+                    raise RuntimeError(
+                        f"Newton continuation failed at load_factor={load_factor:.6g} "
+                        f"after {load_subdivisions} load-interval subdivisions; "
+                        "state restored to the start of the failed interval"
+                    ) from exc
+                midpoint = 0.5 * (current_load_factor + load_factor)
+                if midpoint <= current_load_factor or midpoint >= load_factor:
+                    raise RuntimeError(
+                        f"Newton continuation cannot subdivide load interval "
+                        f"[{current_load_factor:.6g}, {load_factor:.6g}]"
+                    ) from exc
+                load_subdivisions += 1
+                print(
+                    f"Newton continuation retry: step load interval "
+                    f"[{current_load_factor:.6g}, {load_factor:.6g}] failed; "
+                    f"subdividing at {midpoint:.6g} "
+                    f"({load_subdivisions}/{self.newton_max_load_subdivisions} retries)"
+                )
+                pending.insert(0, (load_factor, subdivision_depth + 1))
+                pending.insert(0, (midpoint, subdivision_depth + 1))
+                continue
+            current_load_factor = load_factor
         stages = self._newton_stage_stats
         self._newton_step_stats = {
             "iterations": sum(stage["iterations"] for stage in stages),
             "residual_norm": stages[-1]["residual_norm"] if stages else float("nan"),
             "relative_residual": stages[-1]["relative_residual"] if stages else float("nan"),
             "load_stages": len(stages),
+            "load_subdivisions": load_subdivisions,
         }
 
     def _sample_state_history(self, step, time_s, energies, strain_rms, strain_max, stress_max):

@@ -223,8 +223,9 @@ isfinite(core_spreading_beta) && core_spreading_beta > 0 || error(
     "VARFLEXI_CORE_SPREADING_BETA must be finite and positive"
 )
 vpm_viscous = wake_cfg.viscous_scheme == "CoreSpreading" ?
-              vpm.CoreSpreading(nu, sigma_vpm_overwrite; beta=core_spreading_beta) :
-              nothing
+              vpm.CoreSpreading(nu, sigma_vpm_overwrite, production_zeta_fmm_compat!;
+                                beta=core_spreading_beta) :
+              vpm.Inviscid()
 vpm_sfs = configured_vpm_sfs(solver_cfg.vpm_sfs)
 
 # Preserve exact configs and effective solver settings for each execution.
