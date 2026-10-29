@@ -5,6 +5,7 @@ import json
 import math
 import os
 import socket
+from time import perf_counter
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -175,6 +176,7 @@ class VarFlExICoupler:
         os.makedirs(self.results_dir, exist_ok=True)
         self.log_csv_path = os.path.join(self.results_dir, "coupling_history.csv")
         self.history_jsonl_path = os.path.join(self.results_dir, "forces_sent_received_history.jsonl")
+        self.metadata_json_path = os.path.join(self.results_dir, "coupling_run_metadata.json")
 
         self.state = CouplingRuntimeState(aitken_relax=self.force_relax)
 
@@ -325,11 +327,8 @@ class VarFlExICoupler:
                 [
                     "step",
                     "time",
-                    "n_forces",
                     "force_relax_used",
-                    "force_residual",
-                    "force_reference_norm",
-                    "force_relative_error",
+                    "fluid_force_update_relative_error",
                     "incremental_work_Wf",
                     "incremental_work_Ws",
                     "incremental_work_defect",
@@ -342,20 +341,9 @@ class VarFlExICoupler:
                     "geometry_transfer_apply_time",
                     "solid_solve_time",
                     "solid_io_time",
-                    "crm_setup_time",
-                    "rbf_setup_time",
-                    "geometry_rbf_setup_time",
-                    "geometry_crm_setup_time",
-                    "geometry_residual",
-                    "geometry_reference_norm",
-                    "geometry_relative_error",
-                    "geometry_transfer_residual",
-                    "geometry_transfer_relative_error",
-                    "surface_strain_percent",
-                    "strain_increase_percentage_points",
-                    "sample_fx",
-                    "sample_fy",
-                    "sample_fz",
+                    "cp_geometry_rms_error",
+                    "cp_geometry_max_error",
+                    "cp_geometry_relative_rms_error",
                     "lift",
                     "drag",
                     "cl",
@@ -363,15 +351,19 @@ class VarFlExICoupler:
                     "cm",
                     "solid_step_time",
                     "fluid_step_time",
-                    "fluid_interstep_time",
-                    "solid_time_s",
-                    "fluid_time_s",
+                    "fluid_advance_between_callbacks_time",
                     "particle_count",
                     "bound_circulation_l2_norm",
                     "newton_iterations",
                     "newton_residual_norm",
                     "newton_relative_residual",
                     "newton_load_stages",
+                    "wait_for_solid_geometry_time",
+                    "server_send_geometry_time",
+                    "wait_for_fluid_force_time",
+                    "server_force_processing_time",
+                    "server_send_force_time",
+                    "wait_for_solid_diagnostic_time",
                 ]
             )
 
@@ -380,7 +372,9 @@ class VarFlExICoupler:
             for step in range(1, self.nsteps + 1):
                 print(f"\n--- Step {step} ---")
                 print("Waiting for geometry from solid...")
+                timing_start = perf_counter()
                 geo_data = self.read_json_line(solid_file, "Solid")
+                wait_for_solid_geometry_time = perf_counter() - timing_start
                 geometry = vector_rows(geo_data.get("geometry", []), "geometry")
                 self.validate_geometry_payload(geo_data, geometry, step)
                 print("Geometry received.")
@@ -393,6 +387,11 @@ class VarFlExICoupler:
                 ) = residual_metrics(geometry, self.state.prev_geometry, self.epsilon_reg)
                 self.state.prev_geometry = [row[:] for row in geometry]
                 solid_step_time = optional_float(geo_data, "solid_step_time")
+                cp_geometry_rms_error = optional_float(geo_data, "cp_geometry_rms_error")
+                cp_geometry_max_error = optional_float(geo_data, "cp_geometry_max_error")
+                cp_geometry_relative_rms_error = optional_float(
+                    geo_data, "cp_geometry_relative_rms_error"
+                )
                 surface_strain_percent = optional_float(geo_data, "surface_strain_percent")
                 strain_increase_percentage_points = optional_float(
                     geo_data, "strain_increase_percentage_points"
@@ -406,14 +405,19 @@ class VarFlExICoupler:
                 geo_data["geometry_residual"] = geometry_residual
                 geo_data["geometry_reference_norm"] = geometry_reference_norm
                 geo_data["geometry_relative_error"] = geometry_relative_error
+                timing_start = perf_counter()
                 self.send_json(fluid_conn, geo_data)
+                server_send_geometry_time = perf_counter() - timing_start
                 print(
                     f"Geometry residual={geometry_residual:.3e}, "
                     f"relative={geometry_relative_error:.3e}"
                 )
 
                 print("Waiting for forces from fluid...")
+                timing_start = perf_counter()
                 force_data = self.read_json_line(fluid_file, "Fluid")
+                wait_for_fluid_force_time = perf_counter() - timing_start
+                force_processing_start = perf_counter()
                 forces = vector_rows(force_data.get("force", []), "force")
                 self.validate_force_payload(force_data, forces, step)
                 bound_circulation = force_data.get("bound_circulation")
@@ -461,7 +465,11 @@ class VarFlExICoupler:
                 cl, cd = force_coefficients(relaxed_forces, q_inf, ref_area)
                 lift, drag = force_components(relaxed_forces)
                 fluid_step_time = optional_float(force_data, "fluid_step_time")
-                fluid_interstep_time = optional_float(force_data, "fluid_interstep_time")
+                fluid_advance_between_callbacks_time = optional_float(
+                    force_data,
+                    "fluid_advance_between_callbacks_time",
+                    default=optional_float(force_data, "fluid_interstep_time"),
+                )
                 force_data["lift"] = lift
                 force_data["drag"] = drag
                 force_data["cl"] = cl
@@ -496,10 +504,15 @@ class VarFlExICoupler:
                     )
 
                 print("Sending forces to solid...")
+                server_force_processing_time = perf_counter() - force_processing_start
+                timing_start = perf_counter()
                 self.send_json(solid_conn, force_data)
+                server_send_force_time = perf_counter() - timing_start
+                timing_start = perf_counter()
                 force_transfer_data = self.read_json_line(
                     solid_file, "Solid force-transfer diagnostic"
                 )
+                wait_for_solid_diagnostic_time = perf_counter() - timing_start
                 if force_transfer_data.get("type") != "force_transfer_diagnostics":
                     raise RuntimeError(
                         "Solid sent an unexpected message while coupling expected "
@@ -541,6 +554,30 @@ class VarFlExICoupler:
                 newton_residual_norm = optional_float(force_transfer_data, "newton_residual_norm")
                 newton_relative_residual = optional_float(force_transfer_data, "newton_relative_residual")
                 newton_load_stages = optional_float(force_transfer_data, "newton_load_stages")
+                force_transfer_mode = str(force_transfer_data.get("force_transfer_mode", ""))
+                displacement_transfer_mode = str(
+                    force_transfer_data.get("displacement_transfer_mode", "")
+                )
+                rbf_radius = optional_float(force_transfer_data, "rbf_radius")
+                rbf_neighbors = optional_float(force_transfer_data, "rbf_neighbors")
+                if step == 1:
+                    run_metadata = {
+                        "force_transfer_mode": force_transfer_mode,
+                        "displacement_transfer_mode": displacement_transfer_mode,
+                        "rbf_radius": rbf_radius,
+                        "rbf_neighbors": rbf_neighbors,
+                        "crm_force_operator_setup_time_s": crm_setup_time,
+                        "rbf_force_operator_setup_time_s": rbf_setup_time,
+                        "rbf_geometry_operator_setup_time_s": geometry_rbf_setup_time,
+                        "crm_geometry_operator_setup_time_s": geometry_crm_setup_time,
+                    }
+                    with open(self.metadata_json_path, "w", encoding="utf-8") as metadata_fp:
+                        json.dump(run_metadata, metadata_fp, indent=2, allow_nan=True)
+                    print(
+                        "Transfer configuration: "
+                        f"force={force_transfer_mode}, displacement={displacement_transfer_mode}, "
+                        f"rbf_radius={rbf_radius}, rbf_neighbors={rbf_neighbors}"
+                    )
 
                 json.dump(
                     {
@@ -576,15 +613,14 @@ class VarFlExICoupler:
                         "geometry_transfer_apply_time": geometry_transfer_apply_time,
                         "solid_solve_time": solid_solve_time,
                         "solid_io_time": solid_io_time,
-                        "crm_setup_time": crm_setup_time,
-                        "rbf_setup_time": rbf_setup_time,
-                        "geometry_rbf_setup_time": geometry_rbf_setup_time,
-                        "geometry_crm_setup_time": geometry_crm_setup_time,
                         "geometry_residual": geometry_residual,
                         "geometry_reference_norm": geometry_reference_norm,
                         "geometry_relative_error": geometry_relative_error,
                         "geometry_transfer_residual": geometry_transfer_residual,
                         "geometry_transfer_relative_error": geometry_transfer_relative_error,
+                        "cp_geometry_rms_error": cp_geometry_rms_error,
+                        "cp_geometry_max_error": cp_geometry_max_error,
+                        "cp_geometry_relative_rms_error": cp_geometry_relative_rms_error,
                         "surface_strain_percent": surface_strain_percent,
                         "strain_increase_percentage_points": strain_increase_percentage_points,
                         "force_received": forces_received_raw,
@@ -598,23 +634,29 @@ class VarFlExICoupler:
                         "newton_residual_norm": newton_residual_norm,
                         "newton_relative_residual": newton_relative_residual,
                         "newton_load_stages": newton_load_stages,
+                        "force_transfer_mode": force_transfer_mode,
+                        "displacement_transfer_mode": displacement_transfer_mode,
+                        "rbf_radius": rbf_radius,
+                        "rbf_neighbors": rbf_neighbors,
+                        "wait_for_solid_geometry_time": wait_for_solid_geometry_time,
+                        "server_send_geometry_time": server_send_geometry_time,
+                        "wait_for_fluid_force_time": wait_for_fluid_force_time,
+                        "server_force_processing_time": server_force_processing_time,
+                        "server_send_force_time": server_send_force_time,
+                        "wait_for_solid_diagnostic_time": wait_for_solid_diagnostic_time,
                         "solid_step_time": solid_step_time,
                         "fluid_step_time": fluid_step_time,
-                        "fluid_interstep_time": fluid_interstep_time,
+                        "fluid_advance_between_callbacks_time": fluid_advance_between_callbacks_time,
                     },
                     history_fp,
                 )
                 history_fp.write("\n")
 
-                sample = relaxed_forces[0]
                 writer.writerow(
                     [
                         step,
                         f"{time_value:.6e}" if time_value == time_value else "nan",
-                        len(relaxed_forces),
                         f"{relax_used:.6f}",
-                        f"{force_residual:.6e}",
-                        f"{force_reference_norm:.6e}",
                         f"{force_relative_error:.6e}",
                         f"{incremental_work_Wf:.6e}" if incremental_work_Wf == incremental_work_Wf else "nan",
                         f"{incremental_work_Ws:.6e}" if incremental_work_Ws == incremental_work_Ws else "nan",
@@ -628,20 +670,9 @@ class VarFlExICoupler:
                         f"{geometry_transfer_apply_time:.6e}" if geometry_transfer_apply_time == geometry_transfer_apply_time else "nan",
                         f"{solid_solve_time:.6e}" if solid_solve_time == solid_solve_time else "nan",
                         f"{solid_io_time:.6e}" if solid_io_time == solid_io_time else "nan",
-                        f"{crm_setup_time:.6e}" if crm_setup_time == crm_setup_time else "nan",
-                        f"{rbf_setup_time:.6e}" if rbf_setup_time == rbf_setup_time else "nan",
-                        f"{geometry_rbf_setup_time:.6e}" if geometry_rbf_setup_time == geometry_rbf_setup_time else "nan",
-                        f"{geometry_crm_setup_time:.6e}" if geometry_crm_setup_time == geometry_crm_setup_time else "nan",
-                        f"{geometry_residual:.6e}",
-                        f"{geometry_reference_norm:.6e}",
-                        f"{geometry_relative_error:.6e}",
-                        f"{geometry_transfer_residual:.6e}" if geometry_transfer_residual == geometry_transfer_residual else "nan",
-                        f"{geometry_transfer_relative_error:.6e}" if geometry_transfer_relative_error == geometry_transfer_relative_error else "nan",
-                        f"{surface_strain_percent:.6e}" if surface_strain_percent == surface_strain_percent else "nan",
-                        f"{strain_increase_percentage_points:.6e}" if strain_increase_percentage_points == strain_increase_percentage_points else "nan",
-                        f"{float(sample[0]):.6e}",
-                        f"{float(sample[1]):.6e}",
-                        f"{float(sample[2]):.6e}",
+                        f"{cp_geometry_rms_error:.6e}" if cp_geometry_rms_error == cp_geometry_rms_error else "nan",
+                        f"{cp_geometry_max_error:.6e}" if cp_geometry_max_error == cp_geometry_max_error else "nan",
+                        f"{cp_geometry_relative_rms_error:.6e}" if cp_geometry_relative_rms_error == cp_geometry_relative_rms_error else "nan",
                         f"{float(lift):.6e}",
                         f"{float(drag):.6e}",
                         f"{float(cl):.6e}" if cl == cl else "nan",
@@ -649,15 +680,19 @@ class VarFlExICoupler:
                         f"{optional_float(force_data, 'cm'):.6e}" if optional_float(force_data, "cm") == optional_float(force_data, "cm") else "nan",
                         f"{solid_step_time:.6e}" if solid_step_time == solid_step_time else "nan",
                         f"{fluid_step_time:.6e}" if fluid_step_time == fluid_step_time else "nan",
-                        f"{fluid_interstep_time:.6e}" if fluid_interstep_time == fluid_interstep_time else "nan",
-                        f"{optional_float(geo_data, 'solid_time_s'):.6e}" if optional_float(geo_data, "solid_time_s") == optional_float(geo_data, "solid_time_s") else "nan",
-                        f"{optional_float(force_data, 'fluid_time_s'):.6e}" if optional_float(force_data, "fluid_time_s") == optional_float(force_data, "fluid_time_s") else "nan",
+                        f"{fluid_advance_between_callbacks_time:.6e}" if fluid_advance_between_callbacks_time == fluid_advance_between_callbacks_time else "nan",
                         particle_count if particle_count is not None else "",
                         f"{math.sqrt(sum(value * value for value in bound_circulation or [])):.6e}",
                         newton_iterations,
                         f"{newton_residual_norm:.6e}" if newton_residual_norm == newton_residual_norm else "nan",
                         f"{newton_relative_residual:.6e}" if newton_relative_residual == newton_relative_residual else "nan",
                         newton_load_stages,
+                        f"{wait_for_solid_geometry_time:.6e}",
+                        f"{server_send_geometry_time:.6e}",
+                        f"{wait_for_fluid_force_time:.6e}",
+                        f"{server_force_processing_time:.6e}",
+                        f"{server_send_force_time:.6e}",
+                        f"{wait_for_solid_diagnostic_time:.6e}",
                     ]
                 )
 

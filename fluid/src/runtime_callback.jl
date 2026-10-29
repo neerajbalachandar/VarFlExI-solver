@@ -397,6 +397,7 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
             "force_relative_error" => force_rel_error,
             "fluid_step_time" => fluid_step_time,
             "fluid_interstep_time" => isfinite(fluid_interstep_time) ? fluid_interstep_time : nothing,
+            "fluid_advance_between_callbacks_time" => isfinite(fluid_interstep_time) ? fluid_interstep_time : nothing,
         )
     merge!(trace_record, target_payload)
     push!(force_payload_history, trace_record)
@@ -435,6 +436,7 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         "force_relative_error" => force_rel_error,
         "fluid_step_time" => fluid_step_time,
         "fluid_interstep_time" => isfinite(fluid_interstep_time) ? fluid_interstep_time : nothing,
+        "fluid_advance_between_callbacks_time" => isfinite(fluid_interstep_time) ? fluid_interstep_time : nothing,
     )
     merge!(socket_record, target_payload)
     write(sock, JSON.json(socket_record) * "\n")

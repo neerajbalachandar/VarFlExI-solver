@@ -62,7 +62,7 @@ end
         io,
         "step,time,force_residual,force_reference_norm,force_relative_error," *
         "geometry_residual,geometry_reference_norm,geometry_relative_error," *
-        "lift,drag,cl,cd,cm,fluid_step_time,fluid_interstep_time"
+        "lift,drag,cl,cd,cm,fluid_step_time,fluid_advance_between_callbacks_time"
     )
     n = length(step_hist)
     for k in 1:n
