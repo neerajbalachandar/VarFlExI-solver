@@ -128,12 +128,12 @@ def force_coefficients(
     return lift / denom, drag / denom
 
 
-def optional_float(data: Dict[str, Any], key: str) -> float:
-    value = data.get(key, float("nan"))
+def optional_float(data: Dict[str, Any], key: str, default: float = float("nan")) -> float:
+    value = data.get(key, default)
     try:
         return float(value)
     except (TypeError, ValueError):
-        return float("nan")
+        return float(default)
 
 
 @dataclass

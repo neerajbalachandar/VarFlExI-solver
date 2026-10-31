@@ -1,5 +1,7 @@
 total_time: 3.0
-n_steps: 9000
+# Faster exploratory run: dt = 3.0 / 1200 = 0.0025 s.
+# This is a coarser temporal discretization than the 6000-step run.
+n_steps: 1200
 
 host: 127.0.0.1
 port: 9000
@@ -37,4 +39,4 @@ send_cp: true
 send_le: true
 send_te: true
 
-results_root: results/rect_nonlinear_regime/
+results_root: results/rect_nonlinear/

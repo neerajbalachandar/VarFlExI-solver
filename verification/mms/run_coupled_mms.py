@@ -11,6 +11,7 @@ population is seeded inside the production integrator immediately before its
 first RK stage, allowing a one-step source activation gate.
 """
 import argparse
+import csv
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,16 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 SMOKE_DT = 1.0e-2
+
+
+def configure_csv_field_limit():
+    limit = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(limit)
+            return
+        except OverflowError:
+            limit //= 10
 
 
 class _FlowListDumper(yaml.SafeDumper):
@@ -148,6 +159,7 @@ def run_case(manifest, output, steps=3, constant_source=None, config_dir=ROOT / 
 
 
 def main():
+    configure_csv_field_limit()
     parser = argparse.ArgumentParser()
     parser.add_argument("--config-dir", default=str(ROOT / "config"))
     parser.add_argument("--manifest")
@@ -165,7 +177,6 @@ def main():
     rows = run_case(manifest, args.output, args.steps, config_dir=args.config_dir,
                     dt=args.dt, n_span=args.n_span, nx=args.nx, ny=args.ny)
     solid_rows = []
-    import csv
     with open(Path(args.output) / "solid_mms_history.csv", newline="", encoding="utf-8") as stream:
         solid_rows = list(csv.DictReader(stream))
     coupler_history = Path(args.output) / "coupling" / "coupling" / "forces_sent_received_history.jsonl"

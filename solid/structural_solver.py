@@ -115,8 +115,14 @@ class StructuralSolver:
             self.model.a_old.assign(_target_function(self.model, self.mms_target, 0.0, 2, self.mms_spaces))
             out = self.mms_output or self.out_dir
             os.makedirs(out, exist_ok=True)
-            self.mms_history = open(os.path.join(out, "solid_mms_history.csv"), "w", encoding="utf-8")
-            self.mms_history.write("step,time_s,target_force,numerical_force,target_state,numerical_state,state_error_l2,source_l2\n")
+            self.mms_history = open(
+                os.path.join(out, "solid_mms_history.csv"), "w", newline="", encoding="utf-8"
+            )
+            self.mms_history_writer = csv.writer(self.mms_history)
+            self.mms_history_writer.writerow((
+                "step", "time_s", "target_force", "numerical_force", "target_state",
+                "numerical_state", "state_error_l2", "source_l2",
+            ))
 
     def _setup_simulation_data(self):
         self.T = float(self.coupling_config["total_time"])
@@ -152,7 +158,11 @@ class StructuralSolver:
             span_sampling_mode=cfg_get(
                 self.solid_config,
                 "span_sampling_mode",
-                default=cfg_get(self.coupling_config, "span_sampling", default="node-stride"),
+                default=cfg_get(
+                    self.coupling_config,
+                    "span_sampling_mode",
+                    default=cfg_get(self.coupling_config, "span_sampling", default="node-stride"),
+                ),
             ),
             span_custom_stride=cfg_get(
                 self.coupling_config,
@@ -752,11 +762,16 @@ class StructuralSolver:
                 )
                 tgt_state = tgt_func.vector().get_local()
                 srcnorm = self.mms_rhs_source.norm("l2") if self.mms_rhs_source is not None else 0.0
-                self.mms_history.write(
-                    f"{i_step+1},{physical_time:.16e},{json.dumps(data.get('target_force', []))},"
-                    f"{json.dumps(data.get('force', []))},{json.dumps(tgt_state.tolist())},"
-                    f"{json.dumps(num_state.tolist())},{np.linalg.norm(num_state-tgt_state):.16e},{srcnorm:.16e}\n"
-                )
+                self.mms_history_writer.writerow((
+                    i_step + 1,
+                    f"{physical_time:.16e}",
+                    json.dumps(data.get("target_force", [])),
+                    json.dumps(data.get("force", [])),
+                    json.dumps(tgt_state.tolist()),
+                    json.dumps(num_state.tolist()),
+                    f"{np.linalg.norm(num_state-tgt_state):.16e}",
+                    f"{srcnorm:.16e}",
+                ))
                 self.mms_history.flush()
             solid_solve_time = perf_counter() - solid_solve_start
             self.solid_solve_times[i_step] = solid_solve_time
@@ -872,15 +887,16 @@ class StructuralSolver:
             self.membrane_stress_max[i_step] = membrane_stress_max
             self.model.sig.assign(stress_field)
             solid_io_start = perf_counter()
-            self.xdmf_file.write(self.model.q, t)
-            # The mixed Reissner-Mindlin state has value dimension five
-            # (in-plane displacement[2], transverse displacement, rotation[2]);
-            # DOLFIN's legacy VTK writer cannot serialize that mixed vector.
-            # Export the physical three-component displacement to the PVD.
+            # The mixed Reissner-Mindlin state has five components with
+            # different physical units (in-plane displacement, transverse
+            # displacement, and rotations). Export only physical displacement
+            # as a three-component vector so XDMF/ParaView cannot interpret
+            # the mixed state as a displacement field.
             plate_displacement = project(
                 self.model.displacement_3d(self.model.q), self.model.Vt
             )
             plate_displacement.rename("PlateDisplacement", "")
+            self.xdmf_file.write(plate_displacement, t)
             self.q_pvd << (plate_displacement, t)
             self.sig_pvd << (self.model.sig, t)
             solid_io_time = perf_counter() - solid_io_start

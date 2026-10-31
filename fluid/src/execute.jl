@@ -1,3 +1,5 @@
+include(joinpath(@__DIR__, "visualization_metadata.jl"))
+
 uns.run_simulation(simulation, nsteps;
     Vinf=Vinf,
     rho=rho,
@@ -35,6 +37,8 @@ uns.run_simulation(simulation, nsteps;
     nsteps_save=nsteps_save,
     save_horseshoes=save_horseshoes
 )
+
+write_visualization_time_metadata(save_path, run_name, Float64(dt))
 
 if mms_state_source_enabled
     mms_stage_path = joinpath(save_path, run_name * "_mms_rk3_stage_history.csv")

@@ -8,16 +8,34 @@ import argparse
 import csv
 import json
 import math
+from numbers import Real
 from pathlib import Path
+import sys
 
 from coupled_target import build_default_target, write_manifest
 from run_coupled_mms import ROOT, SMOKE_DT, run_case
 
 
+def configure_csv_field_limit():
+    limit = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(limit)
+            return
+        except OverflowError:
+            limit //= 10
+
+
+configure_csv_field_limit()
+
+
 def flatten(value):
-    if value and isinstance(value[0], list):
-        return [float(v) for item in value for v in item]
-    return [float(v) for v in value]
+    """Flatten scalar or nested JSON arrays without assuming a fixed rank."""
+    if isinstance(value, (list, tuple)):
+        return [component for item in value for component in flatten(item)]
+    if isinstance(value, Real):
+        return [float(value)]
+    raise TypeError(f"expected a numeric scalar or nested sequence, got {type(value).__name__}")
 
 
 def relative_space_time_l2(rows, numerical_key, target_key):
@@ -25,10 +43,53 @@ def relative_space_time_l2(rows, numerical_key, target_key):
     for row in rows:
         numerical, target = row[numerical_key], row[target_key]
         target, numerical = flatten(target), flatten(numerical)
+        if len(numerical) != len(target):
+            raise ValueError(
+                f"{numerical_key}/{target_key} shape mismatch at row: "
+                f"{len(numerical)} numerical values vs {len(target)} target values"
+            )
         errors.extend((float(a)-float(b))**2 for a,b in zip(numerical,target))
         references.extend(float(v)**2 for v in target)
     denominator = math.sqrt(sum(references))
     return math.sqrt(sum(errors)) / max(denominator, 1e-30)
+
+
+def load_completed_case(case, steps):
+    """Reuse a finished case when a prior run stopped during report assembly."""
+    fluid_dir = case / "fluid"
+    traces = list(fluid_dir.glob("*_force_payload_history.jsonl"))
+    solid_path = case / "solid_mms_history.csv"
+    coupling_path = case / "coupling" / "coupling" / "forces_sent_received_history.jsonl"
+    stage_files = list(fluid_dir.glob("*_mms_rk3_stage_history.csv"))
+    if (len(traces) != 1 or not solid_path.is_file() or not coupling_path.is_file()
+            or not coupling_path.read_text().strip() or len(stage_files) != 1):
+        return None
+    try:
+        fluid_rows = [json.loads(line) for line in traces[0].read_text().splitlines() if line.strip()]
+        with solid_path.open(newline="", encoding="utf-8") as stream:
+            solid_rows = list(csv.DictReader(stream))
+        if len(fluid_rows) != steps or len(solid_rows) != steps:
+            return None
+        fluid_required = (
+            "numerical_particle_state", "target_particle_state", "bound_circulation",
+            "target_bound_circulation", "force", "target_force",
+        )
+        if any(key not in row for row in fluid_rows for key in fluid_required):
+            return None
+        for row in solid_rows:
+            numerical = json.loads(row["numerical_state"])
+            target = json.loads(row["target_state"])
+            error = float(row["state_error_l2"])
+            if (not isinstance(numerical, list) or not isinstance(target, list)
+                    or len(numerical) != len(target) or not math.isfinite(error) or error < 0):
+                return None
+        with stage_files[0].open(newline="", encoding="utf-8") as stream:
+            stage_rows = list(csv.DictReader(stream))
+        if not {"1", "2", "3"}.issubset({row.get("stage") for row in stage_rows}):
+            return None
+    except (OSError, ValueError, KeyError, json.JSONDecodeError, csv.Error):
+        return None
+    return fluid_rows, solid_rows
 
 
 def main():
@@ -68,11 +129,16 @@ def main():
                 nspan, nx, ny = args.n_span*level, args.nx*level, args.ny*level
             case = output / f"{study}_level_{level}"
             manifest = write_manifest(build_default_target(config, args.duration, nspan), case / "target.json")
-            fluid = run_case(manifest, case, steps, config_dir=config, dt=dt,
-                             n_span=nspan, nx=nx, ny=ny)
+            cached = load_completed_case(case, steps)
+            if cached is None:
+                fluid = run_case(manifest, case, steps, config_dir=config, dt=dt,
+                                 n_span=nspan, nx=nx, ny=ny)
+                with (case / "solid_mms_history.csv").open(newline="", encoding="utf-8") as stream:
+                    solid_rows = list(csv.DictReader(stream))
+            else:
+                fluid, solid_rows = cached
+                print(f"Reusing completed histories in {case}")
             measures = {}
-            with (case / "solid_mms_history.csv").open(newline="", encoding="utf-8") as stream:
-                solid_rows = list(csv.DictReader(stream))
             solid_pairs = [{"numerical": json.loads(r["numerical_state"]),
                             "target": json.loads(r["target_state"])} for r in solid_rows]
             measures["structural_state_relative_space_time_l2"] = relative_space_time_l2(

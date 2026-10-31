@@ -316,8 +316,8 @@ eta_span_fluid = [clamp(ys_ref[i] / span, 0.0, 1.0) for i in 1:m_span]
 eta_span_coupling = build_coupling_eta_span(
     m_span, solid_ny_for_sampling, span_sampling_mode; custom_stride=custom_span_stride
 )
-if span_sampling_mode == "custom-stride"
-    assert_eta_close("Fluid VLM eta vs custom coupling eta", eta_span_fluid, eta_span_coupling; mode=span_sampling_mode)
+if span_sampling_mode in ("midpoint", "custom-stride")
+    assert_eta_close("Fluid VLM eta vs coupling eta", eta_span_fluid, eta_span_coupling; mode=span_sampling_mode)
 end
 eta_span_force_payload = span_sampling_mode == "custom-stride" ? eta_span_coupling : eta_span_fluid
 eta_chord_force = [eta_cp]
@@ -397,9 +397,9 @@ if haskey(msg0, "n_span")
               "Set fluid n_span or coupling communication span consistently.")
     end
 end
-if span_sampling_mode == "custom-stride" && haskey(msg0, "eta_span") && length(msg0["eta_span"]) == m_span
+if haskey(msg0, "eta_span") && length(msg0["eta_span"]) == m_span
     eta_span_solid = Float64.(msg0["eta_span"])
-    assert_eta_close("Solid eta_span vs fluid coupling eta", eta_span_solid, eta_span_coupling; mode=span_sampling_mode)
+    assert_eta_close("Solid eta_span vs coupling eta", eta_span_solid, eta_span_coupling; mode=span_sampling_mode)
 end
 apply_from_message!(msg0; first_step=true, step=0)
 
