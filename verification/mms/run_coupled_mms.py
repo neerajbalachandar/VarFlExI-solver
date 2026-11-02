@@ -98,7 +98,8 @@ def run_case(manifest, output, steps=3, constant_source=None, config_dir=ROOT / 
         procs.append(subprocess.Popen(cmd_solid, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT))
         time.sleep(0.25)
         julia_project = Path(os.environ.get("FLOWUNSTEADY_PROJECT", ROOT.parent))
-        cmd_fluid = ["julia", f"--project={julia_project}", str(ROOT / "fluid/fluid.jl"),
+        julia_bin = os.environ.get("JULIA_BIN", "julia")
+        cmd_fluid = [julia_bin, f"--project={julia_project}", str(ROOT / "fluid/fluid.jl"),
                      "--fluid", str(work / "fluid_params.yaml"), "--solid", str(work / "solid_params.yaml"),
                      "--coupling", str(work / "coupling_params.yaml"), "--mms-output", str(output / "fluid")]
         if manifest:

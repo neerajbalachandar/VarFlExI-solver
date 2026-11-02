@@ -1,7 +1,7 @@
-total_time: 3.0
-# Faster exploratory run: dt = 3.0 / 1200 = 0.0025 s.
+total_time: 1.5
+# Faster exploratory run: dt = 1.5 / 600 = 0.0025 s.
 # This is a coarser temporal discretization than the 6000-step run.
-n_steps: 1200
+n_steps: 600
 
 host: 127.0.0.1
 port: 9000

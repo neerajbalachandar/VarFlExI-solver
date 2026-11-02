@@ -6,6 +6,7 @@ force time n+alpha_f; observed rates are measurements, not assumed guarantees.
 """
 
 import csv
+import argparse
 import math
 import sys
 from pathlib import Path
@@ -106,3 +107,15 @@ def run_scalar_test(output_dir):
     plt.close(fig)
     return {"status": "PASS", "gamma": gamma, "beta": beta,
             "levels": rows, "csv": str(csv_path)}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-dir", default=str(Path(__file__).parent / "results"))
+    args = parser.parse_args()
+    result = run_scalar_test(args.output_dir)
+    print(f"Scalar generalized-alpha verification complete: {result['csv']}")
+
+
+if __name__ == "__main__":
+    main()
