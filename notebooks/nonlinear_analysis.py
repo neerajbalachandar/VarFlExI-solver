@@ -1,13 +1,3 @@
-#!/usr/bin/env python3
-"""Post-process FLOWUnsteady/FEniCS runs for nonlinear response diagnostics.
-
-Run from the repository root, for example:
-    python3 notebooks/nonlinear_analysis.py --run-dir results/rect_nonlinear_regime
-
-Outputs a long-form ``coupling/nonlinear_analysis.csv`` containing time samples
-and scalar diagnostics, plus PNG figures in ``coupling/nonlinear_analysis_plots``.
-The script reads existing outputs only; it never launches a simulation.
-"""
 from __future__ import annotations
 
 import argparse
@@ -85,6 +75,38 @@ def nearest_nodes(coords):
         "leading_edge": nearest(xmin, ymin + 0.50 * span),
         "root": nearest(xmin + 0.75 * chord, ymin),
     }
+
+
+def structural_aoa_by_span(coords, displacement, span_fractions=(0.2, 0.4, 0.6, 0.8)):
+    """Estimate deformation-induced section AoA from each deformed chord line.
+
+    The XDMF stores (u, v, w) at nodes on the undeformed x-y plate. For each
+    span station, use the leading/trailing edge nodes and calculate the chord
+    pitch in the x-z plane. AoA contribution is minus that pitch, assuming
+    the reference freestream is along +x. This is a geometric structural
+    contribution; gust-induced changes in local flow direction are not included.
+    """
+    xy = np.asarray(coords, dtype=float)
+    q = np.asarray(displacement, dtype=float)
+    if xy.ndim != 2 or xy.shape[1] < 2 or q.ndim != 3 or q.shape[-1] < 3:
+        raise ValueError(f"Expected XY coordinates and (time,node,3+) displacement; got {xy.shape} and {q.shape}")
+    y0, y1 = float(np.min(xy[:, 1])), float(np.max(xy[:, 1]))
+    unique_y = np.unique(xy[:, 1])
+    histories = {}
+    for fraction in span_fractions:
+        target_y = y0 + float(fraction) * (y1 - y0)
+        station_y = float(unique_y[np.argmin(np.abs(unique_y - target_y))])
+        row_ids = np.flatnonzero(np.isclose(xy[:, 1], station_y, rtol=0.0, atol=max(1e-12, (y1-y0)*1e-10)))
+        if len(row_ids) < 2:
+            raise ValueError(f"Could not find a chordwise mesh row at span fraction {fraction:g}")
+        le = int(row_ids[np.argmin(xy[row_ids, 0])])
+        te = int(row_ids[np.argmax(xy[row_ids, 0])])
+        chord_x = (xy[te, 0] + q[:, te, 0]) - (xy[le, 0] + q[:, le, 0])
+        chord_z = q[:, te, 2] - q[:, le, 2]
+        pitch_deg = np.degrees(np.arctan2(chord_z, chord_x))
+        key = f"span_{int(round(float(fraction)*100)):02d}pct"
+        histories[key] = {"pitch_deg": pitch_deg, "aoa_deg": -pitch_deg, "station_y_m": station_y}
+    return histories
 
 
 def finite_derivative(y, t):
@@ -260,6 +282,24 @@ def analyze_run(run_dir: Path, args, rows):
             for name, val in signals.items():
                 add_row(rows, run, "structure", name, np.nan, "m" if name.endswith(("_u", "_v", "_w")) else "rad", str(solid_file), "time_series")
                 for tt, vv in zip(t, val): add_row(rows, run, "structure", name, vv, "m" if name.endswith(("_u", "_v", "_w")) else "rad", str(solid_file), "ok", tt)
+            if state.ndim == 3 and state.shape[-1] >= 3:
+                aoa_histories = structural_aoa_by_span(coords, state)
+                aoa_plot_series = {}
+                for station, values in aoa_histories.items():
+                    aoa = values["aoa_deg"]
+                    pitch = values["pitch_deg"]
+                    metric = f"structural_aoa_{station}_deg"
+                    add_row(rows, run, "structural_aoa", metric, np.nan, "deg", str(solid_file), "time_series; deformation contribution; +x reference flow")
+                    for tt, vv in zip(t, aoa):
+                        add_row(rows, run, "structural_aoa", metric, vv, "deg", str(solid_file), "simulation_sample; deformation contribution; +x reference flow", tt)
+                    for tt, vv in zip(t, pitch):
+                        add_row(rows, run, "structural_aoa", f"section_chord_pitch_{station}_deg", vv, "deg", str(solid_file), "simulation_sample", tt)
+                    add_row(rows, run, "structural_aoa_summary", f"{metric}_max_abs", np.nanmax(np.abs(aoa)), "deg", str(solid_file), "maximum absolute over run")
+                    add_row(rows, run, "structural_aoa_summary", f"{metric}_max", np.nanmax(aoa), "deg", str(solid_file), "maximum over run", float(t[np.nanargmax(aoa)]))
+                    add_row(rows, run, "structural_aoa_summary", f"{metric}_min", np.nanmin(aoa), "deg", str(solid_file), "minimum over run", float(t[np.nanargmin(aoa)]))
+                    aoa_plot_series[station.replace("_", " ")] = aoa
+                plot_line(plots / "structural_aoa_vs_time.png", t, aoa_plot_series,
+                          "Deformation-induced structural AoA at span stations", "AoA contribution (deg)")
             tip = signals.get("tip_w")
             if tip is not None:
                 vel = finite_derivative(tip, t)
@@ -385,9 +425,11 @@ def analyze_run(run_dir: Path, args, rows):
             adf = pd.read_csv(station_csv)
             coefficient_names = ("cl_section", "cd_section", "cm_section")
             for col in adf.columns:
-                if col in ("step", "time_s", "station") or not pd.api.types.is_numeric_dtype(adf[col]):
+                if col in ("step", "time_s", "station", "structural_aoa_deg", "section_chord_pitch_deg") or not pd.api.types.is_numeric_dtype(adf[col]):
                     continue
-                unit = "m" if col.endswith("_m") else "m/s²" if "circulation" in col else "N" if col.endswith("_N") else "N m" if col.endswith("_Nm") else ""
+                unit = ("deg" if col.endswith("_deg") else "m" if col.endswith("_m") else
+                        "m/s²" if "circulation" in col else "N" if col.endswith("_N") else
+                        "N m" if col.endswith("_Nm") else "")
                 for _, r in adf[["time_s", "station", col]].iterrows():
                     add_row(rows, run, "aerodynamic_station", f"station_{int(r['station'])}_{col}", r[col], unit, str(station_csv), "simulation_sample", r["time_s"])
             for coef in coefficient_names:
@@ -402,6 +444,33 @@ def analyze_run(run_dir: Path, args, rows):
                     freq, power, peak, _ = psd_metrics(part[coef].to_numpy(), np.median(np.diff(part.time_s)))
                     add_row(rows, run, "aerodynamic_station_spectrum", f"station_{int(station)}_{coef}_dominant_frequency", peak, "Hz", str(station_csv), "diagnostic_estimate")
                     for fb, pb in zip(freq, power): add_row(rows, run, "spectrum", f"station_{int(station)}_{coef}_psd", pb, f"{coef}²/Hz", str(station_csv), "welch", frequency=fb)
+            if "structural_aoa_deg" in adf:
+                station_ids = np.array(sorted(adf.station.unique()), dtype=int)
+                pick_ix = np.unique(np.rint(np.linspace(0, len(station_ids) - 1, 4)).astype(int))
+                selected_stations = station_ids[pick_ix]
+                aoa_series = {}
+                for station in selected_stations:
+                    part = adf[adf.station == station].sort_values("time_s")
+                    label = f"station_{int(station)}"
+                    aoa_series[label] = part.structural_aoa_deg.to_numpy(float)
+                    metric = f"structural_aoa_station_{int(station)}_deg"
+                    for tt, vv in zip(part.time_s, part.structural_aoa_deg):
+                        add_row(rows, run, "structural_aoa", metric, vv, "deg", str(station_csv),
+                                "simulation_sample; deformed LE/TE; +x reference flow", tt)
+                    values = part.structural_aoa_deg.to_numpy(float)
+                    if len(values):
+                        imax, imin = int(np.nanargmax(values)), int(np.nanargmin(values))
+                        add_row(rows, run, "structural_aoa_summary", f"{metric}_max_abs",
+                                np.nanmax(np.abs(values)), "deg", str(station_csv), "maximum absolute over run")
+                        add_row(rows, run, "structural_aoa_summary", f"{metric}_max",
+                                values[imax], "deg", str(station_csv), "maximum over run", float(part.time_s.iloc[imax]))
+                        add_row(rows, run, "structural_aoa_summary", f"{metric}_min",
+                                values[imin], "deg", str(station_csv), "minimum over run", float(part.time_s.iloc[imin]))
+                if aoa_series:
+                    # All selected series share the fluid solver's station times.
+                    common_times = adf[adf.station == selected_stations[0]].sort_values("time_s").time_s
+                    plot_line(plots / "structural_aoa_aerodynamic_stations_vs_time.png", common_times,
+                              aoa_series, "Deformation-induced AoA at uniform span stations", "AoA contribution (deg)")
         except Exception as exc:
             add_row(rows, run, "aerodynamic_station", "station_history_read_error", np.nan, "", str(station_csv), f"error: {exc}")
 
@@ -599,17 +668,24 @@ def analyze_run(run_dir: Path, args, rows):
         except Exception as exc: add_row(rows, run, "solid_diagnostics", "read_error", np.nan, "", str(solid_diag), f"error: {exc}")
 
     # Run parameter metadata for sweep comparisons.
-    for key, default, unit in (("vinf", np.nan, "m/s"), ("freestream_frequency_hz", args.gust_frequency, "Hz"), ("gust_amplitude", np.nan, "m/s")):
+    run_config_dir = next((p for p in (run_dir / "config", run_dir / "results" / "config") if p.is_dir()), None)
+    config_sources = ([run_config_dir / "fluid_params.yaml", run_config_dir / "coupling_params.yaml"]
+                      if run_config_dir else [])
+    config_status = "saved_run_config" if run_config_dir else "missing_saved_run_config"
+    add_row(rows, run, "run_metadata", "saved_config_available", 1 if run_config_dir else 0,
+            "boolean", str(run_config_dir) if run_config_dir else "", config_status)
+    for key, default, unit in (("vinf", np.nan, "m/s"), ("freestream_frequency_hz", np.nan, "Hz"), ("gust_amplitude", np.nan, "m/s")):
         found = np.nan
-        for cfg in [Path("config/fluid_params.yaml"), Path("config/coupling_params.yaml")]:
+        for cfg in config_sources:
             found = config_number(cfg, key, found)
         metric = "gust_frequency" if key == "freestream_frequency_hz" else key
-        add_row(rows, run, "run_metadata", metric, found, unit, "config/*.yaml", "sweep_parameter")
+        add_row(rows, run, "run_metadata", metric, found, unit,
+                str(run_config_dir) if run_config_dir else "", "sweep_parameter" if run_config_dir else "missing_saved_run_config")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-dir", type=Path, default=Path("results/rect_nonlinear_regime"), help="single run directory")
+    parser.add_argument("--run-dir", type=Path, default=Path("/media/dysco/New Volume/Neeraj/VarFlExI_Results/rect_nonlinear"), help="single run directory")
     parser.add_argument("--output", type=Path, default=None, help="output CSV (default: each run's coupling/nonlinear_analysis.csv)")
     parser.add_argument("--transient-fraction", type=float, default=.4, help="discard this fraction for nonlinear summary metrics")
     parser.add_argument("--gust-frequency", type=float, default=.7, help="gust frequency (Hz) for Poincare sampling")

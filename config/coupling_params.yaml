@@ -26,8 +26,8 @@ max_abs_force_component: null
 enforce_chord_projection: false
 enforce_span_projection: false
 
-force_relax: 0.5
-geom_relax: 0.5
+force_relax: 1.0
+geom_relax: 1.0
 force_change_warning_relative: 0.5
 force_change_warning_interval: 20
 epsilon_reg: 1.0e-16

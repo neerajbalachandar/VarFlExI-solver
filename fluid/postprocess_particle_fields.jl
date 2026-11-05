@@ -23,7 +23,11 @@ function parse_options(args)
         "fluid-config" => joinpath(@__DIR__, "..", "config", "fluid_params.yaml"),
         "solid-config" => joinpath(@__DIR__, "..", "config", "solid_params.yaml"),
         "coupling-config" => joinpath(@__DIR__, "..", "config", "coupling_params.yaml"),
-        "nx" => "40", "ny" => "30", "nz" => "25",
+        "nx" => "32", "ny" => "32", "nz" => "32",
+        "bounds" => "",
+        "bounds-file" => "",
+        "add-j" => "false",
+        "add-wapprox" => "false",
         "max-particles" => "0",
         "include-static" => "true",
     )
@@ -40,7 +44,11 @@ function parse_options(args)
               --fluid-config FILE      Legacy-run fallback (no run manifest)
               --solid-config FILE      Legacy-run fallback
               --coupling-config FILE   Legacy-run fallback
-              --nx N --ny N --nz N     Grid cell counts (default: 40,30,25)
+              --nx N --ny N --nz N     Grid cell counts (default: 32,32,32)
+              --bounds CSV             Fixed x0,x1,y0,y1,z0,z1 bounds (meters); default uses body-based bounds
+              --bounds-file JSON      Per-step bounds map written by the analysis notebook
+              --add-j BOOL             Save velocity Jacobian fields for Q and consistency checks
+              --add-wapprox BOOL       Also save FLOWVPM zeta_fmm vorticity approximation as Wapprox (default: false)
               --max-particles N        Override particle-field capacity
               --include-static BOOL    Include PREFIX_staticpfield.N.h5 (default: true)
             """)
@@ -223,6 +231,22 @@ function main()
     steps = parse_steps(opts["steps"], available)
     missing = setdiff(steps, available)
     isempty(missing) || error("Requested particle steps are absent: $(missing)")
+    bounds_by_step = isempty(opts["bounds-file"]) ? nothing : JSON.parsefile(abspath(opts["bounds-file"]))
+    if bounds_by_step !== nothing
+        missing_bounds = [step for step in steps if !haskey(bounds_by_step, string(step))]
+        isempty(missing_bounds) || error("Bounds file lacks requested steps: $(missing_bounds)")
+    end
+    # Preserve the physical time recorded in the XMF companion when present.
+    # Older writers sometimes stored integer step numbers here; that case is
+    # detected and corrected using the saved run dt below.
+    snapshot_times = Dict{Int,Float64}()
+    for step in steps
+        xmf = joinpath(input_dir, "$(dynamic_prefix).$(step).xmf")
+        if isfile(xmf)
+            match_time = match(r"<Time\s+Value=\"([^\"]+)\"", read(xmf, String))
+            match_time === nothing || (snapshot_times[step] = parse(Float64, match_time.captures[1]))
+        end
+    end
     if haskey(metadata, "created_unix")
         stale = [step for step in steps if stat(joinpath(input_dir, "$(dynamic_prefix).$(step).h5")).mtime < Float64(metadata["created_unix"])]
         isempty(stale) || @warn "Some selected particle files predate the chosen run manifest. They may belong to another run; select matching steps or pass --metadata explicitly." stale_steps=stale metadata=provenance
@@ -232,8 +256,16 @@ function main()
     mkpath(output_dir)
     span = Float64(effective["span"])
     chord = max(Float64(effective["root_chord"]), Float64(effective["tip_chord"]))
-    pmin = [-chord, -0.1span, -0.5span]
-    pmax = [4span, 1.1span, 0.5span]
+    if isempty(opts["bounds"])
+        pmin = [-chord, -0.1span, -0.5span]
+        pmax = [4span, 1.1span, 0.5span]
+    else
+        bounds = parse.(Float64, split(opts["bounds"], ','))
+        length(bounds) == 6 || error("--bounds must contain x0,x1,y0,y1,z0,z1")
+        pmin = [bounds[1], bounds[3], bounds[5]]
+        pmax = [bounds[2], bounds[4], bounds[6]]
+        all(pmax .> pmin) || error("Every --bounds maximum must exceed its minimum")
+    end
     divisions = [parse(Int, opts["nx"]), parse(Int, opts["ny"]), parse(Int, opts["nz"])]
     all(>(0), divisions) || error("Grid divisions must all be positive")
     node_count = prod(divisions .+ 1)
@@ -242,18 +274,39 @@ function main()
     capacity = capacity_setting > 0 ? capacity_setting : Int(effective["max_particles"]) + node_count
     capacity > node_count || error("Particle capacity must exceed the grid node count")
     pfield = vpm.ParticleField(capacity; UJ=vpm.UJ_fmm, fmm=fmm)
-    grid = gt.Grid(pmin, pmax, divisions)
     include_static = lowercase(opts["include-static"]) in ("true", "1", "yes")
     dt = Float64(effective["dt"])
 
     println("Run metadata: $(provenance)")
     println("Particle data: $(input_dir)/$(dynamic_prefix).N.h5")
     println("Steps: $(first(steps)) through $(last(steps)) ($(length(steps)) snapshots)")
-    println("Grid nodes: $(node_count); bounds: $(pmin) to $(pmax); cells: $(divisions)")
+    println("Grid nodes: $(node_count); cells: $(divisions); bounds mode: ", bounds_by_step === nothing ? "fixed" : "per-step cumulative")
     println("Static particles requested: $(include_static); output: $(output_dir)")
 
     for step in steps
-        println("Processing step $(step) at t=$(step * dt) s")
+        if bounds_by_step !== nothing
+            bounds = Float64.(bounds_by_step[string(step)])
+            length(bounds) == 6 || error("Bounds entry for step $(step) must contain x0,x1,y0,y1,z0,z1")
+            pmin = [bounds[1], bounds[3], bounds[5]]
+            pmax = [bounds[2], bounds[4], bounds[6]]
+            all(pmax .> pmin) || error("Invalid per-step bounds at step $(step)")
+        end
+        grid = gt.Grid(pmin, pmax, divisions)
+        println("Grid bounds at step $(step): $(pmin) to $(pmax)")
+        flush(stdout)
+        xmf_time = get(snapshot_times, step, NaN)
+        # The repository's legacy FLOWUnsteady XMF writer stored integer step
+        # numbers as times. visualization_metadata.jl documents this behavior.
+        # Correct only that recognizable legacy case; otherwise preserve XMF.
+        legacy_step_time = isfinite(xmf_time) && dt != 1.0 && isapprox(xmf_time, Float64(step); atol=1e-10, rtol=0)
+        time = legacy_step_time ? step * dt : (isfinite(xmf_time) ? xmf_time : step * dt)
+        if legacy_step_time
+            @warn "XMF contains the legacy integer step timestamp; converting using run dt" step xmf_time step_dt=dt corrected_time=time
+        elseif isfinite(xmf_time) && abs(time - step * dt) > max(1e-8, 1e-5 * max(abs(time), abs(step * dt)))
+            @warn "XMF timestamp differs from step*dt; preserving XMF timestamp" step xmf_time step_dt=step*dt
+        end
+        println("Processing step $(step) at t=$(time) s")
+        flush(stdout)
         vpm.read!(pfield, "$(dynamic_prefix).$(step).h5"; path=input_dir, overwrite=true)
         static_file = joinpath(input_dir, "$(static_prefix).$(step).h5")
         if include_static && isfile(static_file)
@@ -263,13 +316,22 @@ function main()
         end
 
         uns.computefluiddomain(pfield, [grid];
-            add_Uinf=false, save_path=nothing, verbose=true,
+            add_Uinf=false, add_J=lowercase(opts["add-j"]) in ("true", "1", "yes"),
+            add_Wapprox=lowercase(opts["add-wapprox"]) in ("true", "1", "yes"),
+            # The installed utilities_fluiddomain.jl references an undefined
+            # timing variable in verbose messages. The outer loop logs progress.
+            save_path=nothing, verbose=false,
         )
         velocity = grid.field["U"]["field_data"]
+        induced_velocity = copy(velocity)
+        gt.add_field(grid, "Uinduced", "vector", induced_velocity, "node")
+        ambient_velocity = zeros(size(velocity))
         for node in 1:grid.nnodes
-            velocity[:, node] .+= freestream_at(view(grid.nodes, 1:3, node), step * dt, effective)
+            ambient_velocity[:, node] .= freestream_at(view(grid.nodes, 1:3, node), time, effective)
         end
-        gt.save(grid, "$(run_name)_fluiddomain"; path=output_dir, num=step, time=step * dt)
+        gt.add_field(grid, "Uinf", "vector", ambient_velocity, "node")
+        velocity .+= ambient_velocity
+        gt.save(grid, "$(run_name)_fluiddomain"; path=output_dir, num=step, time=time)
     end
     println("Done. XMF/H5 grids containing U (total velocity) and W (particle-induced vorticity) are in $(output_dir).")
 end

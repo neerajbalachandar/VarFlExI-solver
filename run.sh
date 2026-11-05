@@ -37,6 +37,36 @@ trap cleanup EXIT INT TERM
 cd "$ROOT_DIR"
 export PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}"
 
+# Snapshot the exact inputs beside this run's data before any solver starts.
+# This only copies existing settings; it does not change or relax them.
+python - "$CONFIG_DIR" <<'PY'
+import json
+import shutil
+import sys
+from pathlib import Path
+
+import yaml
+
+config_dir = Path(sys.argv[1]).expanduser().resolve()
+names = ("fluid_params.yaml", "solid_params.yaml", "coupling_params.yaml")
+configs = {name: yaml.safe_load((config_dir / name).read_text()) or {} for name in names}
+solid = configs["solid_params.yaml"]
+coupling = configs["coupling_params.yaml"]
+root_value = solid.get("results_root") or coupling.get("results_root") or configs["fluid_params.yaml"].get("save_directory", "results")
+results_root = Path(root_value).expanduser()
+if not results_root.is_absolute():
+    results_root = (Path.cwd() / results_root).resolve()
+snapshot_dir = results_root / "config"
+snapshot_dir.mkdir(parents=True, exist_ok=True)
+for name in names:
+    shutil.copy2(config_dir / name, snapshot_dir / name)
+(results_root / "run_configuration.json").write_text(
+    json.dumps({"config_source": str(config_dir), "configs": configs}, indent=2) + "\n",
+    encoding="utf-8",
+)
+print(f"Run configuration snapshot: {snapshot_dir} and {results_root / 'run_configuration.json'}")
+PY
+
 python coupling/varflexi.py --config_path "$CONFIG_DIR" &
 COUPLING_PID=$!
 
