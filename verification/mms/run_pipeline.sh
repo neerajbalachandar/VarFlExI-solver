@@ -24,6 +24,7 @@ Environment:
   JULIA_BIN               Julia launcher (default: bundled OpenSSL-compatible launcher)
   JULIA_REAL_BIN          Julia executable used by the bundled launcher
   JULIA_OPENSSL_LIB       OpenSSL artifact lib directory, if not the default
+  JULIA_NUM_THREADS       Julia threads for the fluid FMM study (default: available CPUs)
   FLOWUNSTEADY_PROJECT    Julia project directory (default: ../FLOWUnsteady)
 
 All execution phases run real solver cases and can take substantial time.
@@ -61,7 +62,9 @@ run_plate() {
 }
 
 run_fluid() {
-    "$JULIA_BIN" --project="$FLOWUNSTEADY_PROJECT" verification/mms/run_refinement.jl \
+    local fluid_threads="${JULIA_NUM_THREADS:-$(nproc)}"
+    printf '[fluid] Julia threads=%s\n' "$fluid_threads"
+    JULIA_NUM_THREADS="$fluid_threads" "$JULIA_BIN" --project="$FLOWUNSTEADY_PROJECT" verification/mms/run_refinement.jl \
         --study time,panels --execute --output verification/mms/results/pipeline/fluid
     run_python verification/mms/analyze.py --study time --results verification/mms/results/pipeline/fluid
     run_python verification/mms/analyze.py --study panels --results verification/mms/results/pipeline/fluid

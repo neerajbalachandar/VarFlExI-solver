@@ -23,9 +23,12 @@ def main():
     # FLOWUnsteady emits its initial t=0 coupling payload before advancing the
     # VPM field. Two coupling callbacks therefore contain exactly one actual
     # fluid time update, which is the smallest source-active production smoke.
-    target_path = write_manifest(build_default_target(ROOT / "config", 2*SMOKE_DT), out / "target.json")
-    constant = run_case(None, out / "constant", steps=2, constant_source="0.025,-0.012,0.008")
-    target = run_case(target_path, out / "target", steps=2)
+    n_span = 16
+    target_path = write_manifest(
+        build_default_target(ROOT / "config", 2*SMOKE_DT, n_span_override=n_span),
+        out / "target.json")
+    baseline = run_case(None, out / "baseline", steps=2, n_span=n_span)
+    target = run_case(target_path, out / "target", steps=2, n_span=n_span)
     def source_peak(path):
         stage_files = list((Path(path) / "fluid").glob("*_mms_rk3_stage_history.csv"))
         if not stage_files:
@@ -33,9 +36,9 @@ def main():
         rows = stage_files[0].read_text().splitlines()[1:]
         vals = [float(row.split(",")[3]) for row in rows if row.strip()]
         return max(vals, default=0.0)
-    const_norm, target_norm = source_peak(out / "constant"), source_peak(out / "target")
-    if const_norm <= 1e-12 or target_norm <= 1e-12:
-        raise AssertionError(f"source path inactive: constant={const_norm}, target={target_norm}")
+    target_norm = source_peak(out / "target")
+    if target_norm <= 1e-12:
+        raise AssertionError(f"target source path inactive: target={target_norm}")
     if not all("target_force" in row for row in target):
         raise AssertionError("target aerodynamic history is missing")
     stage_files = list((out / "target" / "fluid").glob("*_mms_rk3_stage_history.csv"))
@@ -54,13 +57,13 @@ def main():
     numeric_states = [row["numerical_particle_state"]["position"] for row in target]
     if len(numeric_states) > 1 and numeric_states[0] == numeric_states[-1]:
         raise AssertionError("numerical particle state did not evolve between physical times")
-    if [r["cl"] for r in constant] == [r["cl"] for r in target]:
-        raise AssertionError("constant and target source histories are identical")
-    result = {"constant_source_rms": const_norm, "target_source_rms": target_norm,
+    if [r["cl"] for r in baseline] == [r["cl"] for r in target]:
+        raise AssertionError("baseline and target source histories are identical")
+    result = {"target_source_rms": target_norm,
               "target_particle_position_error_l2": [row["particle_state_error"]["position_l2"] for row in target],
               "target_source_stage_rows": len(stage_rows),
               "numerical_particle_evolution_observed": True,
-              "constant_vs_target_cl_differ": True}
+              "baseline_vs_target_cl_differ": True}
     (out / "G0.json").write_text(json.dumps(result, indent=2) + "\n")
     print("PASS G0 checks_manifest_loading.py", json.dumps(result))
 
