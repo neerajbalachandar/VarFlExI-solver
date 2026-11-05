@@ -15,7 +15,7 @@ work_conservation_mode: true
 span_sampling_mode: midpoint
 custom_span_stride: null
 
-force_transfer_mode: crm
+force_transfer_mode: rbf
 # Geometry/displacement transfer to aerodynamic LE/TE stations.
 displacement_transfer_mode: rbf
 rbf_radius: 0.03
@@ -39,4 +39,4 @@ send_cp: true
 send_le: true
 send_te: true
 
-results_root: results/rect_nonlinear/
+results_root: results/05-11-rbf/

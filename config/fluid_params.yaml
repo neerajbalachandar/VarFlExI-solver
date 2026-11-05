@@ -1,37 +1,39 @@
-run_name: rect_nonlinear
+run_name: 05-11-rbf
 # Vahana uses 5 wake particles per shed segment and step. This improves wake
 # resolution and reduces sigma_vpm_overwrite at fixed dt and freestream speed.
 particles_per_step: 3
 save_every: 1
 
-aoa_deg: 3.0
+aoa_deg: 5.0
 rho: 1.225
 nu: 1.5e-05
 
 # V(x,t) = V0 + G*(x-x_ref) + cyclic transverse sinusoidal gust.
 # Gust amplitudes are m/s, wavenumbers are rad/m; this deterministic gust is
 # not a substitute for resolved turbulence or an LES inflow.
-vinf: 30.0
+vinf: 15.0
 
 # 1. Add spatial shear (linear velocity variations across the inlet)
 # Example: Mean flow increases with height (z) to simulate a boundary layer
-freestream_gradient: [0, 0, 0,  0, 0, 0,  0.1, 0.0, 0.0] 
+freestream_gradient: [0, 0, 0,  0, 0, 0,  0.0, 0.0, 0.0] 
 
 # 2. Oscillate all three components (u, v, w) instead of just z
 # Introduces surge (x), sway (y), and heave (z) velocity variations
-freestream_oscillation: [1.5, 1.0, 2.5]
+# freestream_oscillation: [1.5, 1.0, 2.5]
+freestream_oscillation: [0, 0, 0]
 
 # 3. Create cross-axis coupling 
 # Changing the wavenumber vector forces the wave to travel diagonally across the mesh
-freestream_wavenumber: [0.7, 0.3, 0.2]
+# freestream_wavenumber: [0.7, 0.3, 0.2]
+freestream_wavenumber: [0, 0, 0]
 
 # 4. Use a non-integer frequency 
 # Prevents clean harmonic locking with typical solver time steps
-freestream_frequency_hz: 1.73
+freestream_frequency_hz: 0.0
 
 # 5. Shift the phase
 # Shifts the wave origin away from the absolute coordinate center
-freestream_phase_deg: 45.0
+freestream_phase_deg: 0.0  
 
 freestream_reference: [0, 0, 0]
 
@@ -96,10 +98,10 @@ autotune_regularization: false
 default_rho_over_sigma: 1.0
 minimum_ncrit: 3
 
-viscous_scheme: none
+viscous_scheme: CoreSpreading
 vpm_sfs: none
 
-save_directory: results/rect_nonlinear/fluid/
+save_directory: results/05-11-rbf/fluid/
 create_directory: true
 create_savepath: true
 prompt: false

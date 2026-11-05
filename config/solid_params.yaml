@@ -20,9 +20,9 @@ q_pvd_filename: plate_state.pvd
 sig_pvd_filename: membrane_stress.pvd
 diag_csv_filename: solid_v18_diagnostics.csv
 
-E: 1.0e9
+E: 5.0e9
 nu: 0.33
-rho_s: 1400.0
+rho_s: 1600.0
 
 eta_m: 1.2
 eta_k: 5.0e-5
