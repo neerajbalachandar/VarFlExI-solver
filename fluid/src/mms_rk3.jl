@@ -155,19 +155,30 @@ function production_zeta_fmm_compat!(pfield)
     """Evaluate FLOWVPM's installed zeta FMM with its required source flag.
 
     Formulation section: "Core spreading and remapping are handled as
-    actually implemented". FLOWVPM 4.x calls the FastMultipole tree
-    constructor without the required `target=false` positional flag; this
-    adapter supplies that flag and preserves the installed direct-list zeta
-    accumulation and downstream RBF remap.
+    actually implemented". This adapter supplies the explicit source-tree
+    flag and per-system leaf-size type required by the installed FastMultipole
+    API, while preserving direct-list zeta accumulation and the downstream
+    RBF remap.
     """
     # FLOWVPM's stock zeta_fmm calls Tree((pfield,); ...), but the installed
-    # FastMultipole version requires the explicit `target` positional flag.
+    # FastMultipole version requires the explicit `target` positional flag and
+    # a per-system SVector leaf size.
     # Empty fields have no remap contributions and need no tree.
     vpm.get_np(pfield) == 0 && return nothing
     options = pfield.fmm
-    leaf_size, shrink_recenter = options.ncrit, options.shrink_recenter
+    # FastMultipole 2.x expects one leaf-size value per source system. The
+    # FLOWVPM FMM options store the single-system value as an Int, so convert
+    # it to the one-element SVector used by Tree and interaction-list methods.
+    leaf_size = vpm.FastMultipole.SVector{1,Int}((Int(options.ncrit),))
+    shrink_recenter = options.shrink_recenter
     acceptance = options.theta
     zeta = pfield.kernel.zeta
+    # CoreSpreading's conjugate-gradient remap calls this evaluator repeatedly
+    # for distinct matrix-vector products. J is scratch/output storage, so
+    # clear it on every call instead of accumulating the previous product.
+    for particle in vpm.iterator(pfield)
+        vpm.get_J(particle)[1:3] .= 0
+    end
     tree = vpm.FastMultipole.Tree((pfield,), false; leaf_size, shrink_recenter)
     _, direct_list = vpm.FastMultipole.build_interaction_lists(
         tree.branches, tree.branches, leaf_size, acceptance, false, true, true

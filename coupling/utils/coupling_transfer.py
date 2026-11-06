@@ -423,10 +423,39 @@ class CouplingTransfer:
     @staticmethod
     def wrench_transfer_metrics(aero_coords, aero_forces, solid_coords, nodal_forces, epsilon_reg=1.0e-16):
         """Return net-force and net-moment transfer residuals about the origin."""
-        aero_coords = np.asarray(aero_coords, dtype=float).reshape(-1, 3)
-        aero_forces = np.asarray(aero_forces, dtype=float).reshape(-1, 3)
-        solid_coords = np.asarray(solid_coords, dtype=float).reshape(-1, 3)
-        nodal_forces = np.asarray(nodal_forces, dtype=float).reshape(-1, 3)
+
+        def as_xyz(values, name):
+            values = np.asarray(values, dtype=float)
+            if values.ndim != 2 or values.shape[1] not in (2, 3):
+                raise ValueError(
+                    f"{name} must have shape (n, 2) or (n, 3); got {values.shape}"
+                )
+            if values.shape[1] == 2:
+                # The plate and aerodynamic surface meshes are planar (x, y).
+                # Preserve one row per mesh node when forming 3D moment arms.
+                values = np.column_stack((values, np.zeros(values.shape[0])))
+            return values
+
+        def as_vectors(values, name):
+            values = np.asarray(values, dtype=float)
+            if values.ndim != 2 or values.shape[1] != 3:
+                raise ValueError(f"{name} must have shape (n, 3); got {values.shape}")
+            return values
+
+        aero_coords = as_xyz(aero_coords, "aero_coords")
+        aero_forces = as_vectors(aero_forces, "aero_forces")
+        solid_coords = as_xyz(solid_coords, "solid_coords")
+        nodal_forces = as_vectors(nodal_forces, "nodal_forces")
+        if aero_coords.shape[0] != aero_forces.shape[0]:
+            raise ValueError(
+                "Aerodynamic coordinate/force count mismatch: "
+                f"{aero_coords.shape[0]} coordinates vs {aero_forces.shape[0]} forces"
+            )
+        if solid_coords.shape[0] != nodal_forces.shape[0]:
+            raise ValueError(
+                "Structural coordinate/force count mismatch: "
+                f"{solid_coords.shape[0]} coordinates vs {nodal_forces.shape[0]} forces"
+            )
         force_fluid = np.sum(aero_forces, axis=0)
         force_solid = np.sum(nodal_forces, axis=0)
         moment_fluid = np.sum(np.cross(aero_coords, aero_forces), axis=0)

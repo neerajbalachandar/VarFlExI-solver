@@ -98,7 +98,7 @@ autotune_regularization: false
 default_rho_over_sigma: 1.0
 minimum_ncrit: 3
 
-viscous_scheme: CoreSpreading
+viscous_scheme: none
 vpm_sfs: none
 
 save_directory: results/05-11-rbf/fluid/
