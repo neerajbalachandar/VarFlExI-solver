@@ -18,6 +18,7 @@ class CouplingTransfer:
         eta_cp,
         force_transfer_mode="rbf",
         displacement_transfer_mode="rbf",
+        crm_moment_conservative=True,
         rbf_radius=0.08,
         rbf_neighbors=24,
         max_abs_force_component=5.0e3,
@@ -41,6 +42,9 @@ class CouplingTransfer:
                 f"Unsupported displacement_transfer_mode '{displacement_transfer_mode}'. "
                 "Expected 'crm' or 'rbf'."
             )
+        self.crm_moment_conservative = (
+            self.force_transfer_mode == "crm" and bool(crm_moment_conservative)
+        )
         self.eta_span_comm = np.asarray(eta_span_comm, dtype=float).reshape(-1)
         self.eta_cp = float(eta_cp)
         self.eta_cp_comm = np.array([self.eta_cp], dtype=float)
@@ -122,6 +126,7 @@ class CouplingTransfer:
         self.A_diag = np.ones((self.cp_targets.shape[0],), dtype=float)
         self.S_lumped = None
         self.crm_setup_time = 0.0
+        self.crm_moment_operator_stats = None
         self.rbf_setup_time = 0.0
 
         if self.force_transfer_mode == "crm":
@@ -129,6 +134,15 @@ class CouplingTransfer:
             self.crm_transfer_matrix, self.crm_panel_areas, self.crm_panel_polys = (
                 self.crm_backend.build_common_refinement_operator()
             )
+            if self.crm_moment_conservative:
+                self.crm_transfer_matrix, self.crm_moment_operator_stats = (
+                    self.crm_backend.build_moment_constrained_operator(
+                        self.crm_transfer_matrix,
+                        self.crm_panel_areas,
+                        self.cp_targets[:, :2],
+                        self.crm_backend.force_dof_coords,
+                    )
+                )
             self.crm_setup_time = perf_counter() - t_setup
         else:
             t_setup = perf_counter()

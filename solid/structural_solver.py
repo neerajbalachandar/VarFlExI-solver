@@ -293,6 +293,9 @@ class StructuralSolver:
             displacement_transfer_mode=cfg_get(
                 self.coupling_config, "displacement_transfer_mode", default="rbf"
             ),
+            crm_moment_conservative=cfg_get(
+                self.coupling_config, "crm_moment_conservative", default=True
+            ),
             rbf_radius=cfg_get(self.coupling_config, "rbf_radius", default=0.08),
             rbf_neighbors=cfg_get(self.coupling_config, "rbf_neighbors", default=24),
             max_abs_force_component=cfg_get(
@@ -308,6 +311,17 @@ class StructuralSolver:
         self.displacement_transfer_mode = self.transfer.displacement_transfer_mode
         print(f"Solid force transfer mode: {self.force_transfer_mode}")
         print(f"Solid displacement transfer mode: {self.displacement_transfer_mode}")
+        print(
+            "CRM moment constraint: "
+            f"{self.transfer.crm_moment_conservative if self.force_transfer_mode == 'crm' else 'not applicable'}"
+        )
+        if self.transfer.crm_moment_operator_stats is not None:
+            print(
+                "CRM moment operator setup audit: "
+                f"minimum active weight={self.transfer.crm_moment_operator_stats['minimum_active_weight']:.3e}, "
+                f"max constraint residual="
+                f"{self.transfer.crm_moment_operator_stats['maximum_constraint_residual']:.3e}"
+            )
         self.crm_transfer_matrix = self.transfer.crm_transfer_matrix
         self.crm_panel_areas = self.transfer.crm_panel_areas
         self.crm_panel_polys = self.transfer.crm_panel_polys
@@ -794,6 +808,15 @@ class StructuralSolver:
                 "geometry_crm_setup_time": self.transfer.geometry_crm_setup_time,
                 "force_transfer_mode": self.force_transfer_mode,
                 "displacement_transfer_mode": self.displacement_transfer_mode,
+                "crm_moment_conservative": self.transfer.crm_moment_conservative,
+                "crm_minimum_active_force_weight": (
+                    self.transfer.crm_moment_operator_stats["minimum_active_weight"]
+                    if self.transfer.crm_moment_operator_stats is not None else None
+                ),
+                "crm_max_moment_constraint_residual": (
+                    self.transfer.crm_moment_operator_stats["maximum_constraint_residual"]
+                    if self.transfer.crm_moment_operator_stats is not None else None
+                ),
                 "rbf_radius": self.transfer.rbf_radius,
                 "rbf_neighbors": self.transfer.rbf_neighbors,
                 "newton_iterations": self._newton_step_stats.get("iterations", 0),

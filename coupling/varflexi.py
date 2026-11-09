@@ -539,12 +539,24 @@ class VarFlExICoupler:
                 displacement_transfer_mode = str(
                     force_transfer_data.get("displacement_transfer_mode", "")
                 )
+                crm_moment_conservative = bool(
+                    force_transfer_data.get("crm_moment_conservative", False)
+                )
+                crm_minimum_active_force_weight = optional_float(
+                    force_transfer_data, "crm_minimum_active_force_weight"
+                )
+                crm_max_moment_constraint_residual = optional_float(
+                    force_transfer_data, "crm_max_moment_constraint_residual"
+                )
                 rbf_radius = optional_float(force_transfer_data, "rbf_radius")
                 rbf_neighbors = optional_float(force_transfer_data, "rbf_neighbors")
                 if step == 1:
                     run_metadata = {
                         "force_transfer_mode": force_transfer_mode,
                         "displacement_transfer_mode": displacement_transfer_mode,
+                        "crm_moment_conservative": crm_moment_conservative,
+                        "crm_minimum_active_force_weight": crm_minimum_active_force_weight,
+                        "crm_max_moment_constraint_residual": crm_max_moment_constraint_residual,
                         "rbf_radius": rbf_radius,
                         "rbf_neighbors": rbf_neighbors,
                         "crm_force_operator_setup_time_s": crm_setup_time,
@@ -557,6 +569,7 @@ class VarFlExICoupler:
                     print(
                         "Transfer configuration: "
                         f"force={force_transfer_mode}, displacement={displacement_transfer_mode}, "
+                        f"CRM moment-constrained={crm_moment_conservative}, "
                         f"rbf_radius={rbf_radius}, rbf_neighbors={rbf_neighbors}"
                     )
 
@@ -617,6 +630,7 @@ class VarFlExICoupler:
                         "newton_load_stages": newton_load_stages,
                         "force_transfer_mode": force_transfer_mode,
                         "displacement_transfer_mode": displacement_transfer_mode,
+                        "crm_moment_conservative": crm_moment_conservative,
                         "rbf_radius": rbf_radius,
                         "rbf_neighbors": rbf_neighbors,
                         "wait_for_solid_geometry_time": wait_for_solid_geometry_time,

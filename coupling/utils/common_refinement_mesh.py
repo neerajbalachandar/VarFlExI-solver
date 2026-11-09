@@ -1,5 +1,6 @@
 from dolfin import *
 import numpy as np
+from scipy.optimize import minimize
 
 
 class CommonRefinementMesh:
@@ -276,6 +277,135 @@ class CommonRefinementMesh:
     def nodal_displacements_to_panel_average(nodal_disp, C, panel_areas):
         nodal_disp = np.asarray(nodal_disp, dtype=float).reshape(-1, 3)
         return (C.T @ nodal_disp) / np.asarray(panel_areas, dtype=float).reshape(-1, 1)
+
+    @staticmethod
+    def build_moment_constrained_operator(
+        C, panel_areas, panel_targets, dof_coords, feasibility_tol=1.0e-9
+    ):
+        """Correct CRM overlap weights to preserve each panel's force and moment.
+
+        For panel j, the original CRM column defines nonnegative normalized
+        weights ``w0 = C[:, j] / area[j]``.  This routine finds the closest
+        nonnegative weights satisfying partition of unity and first spatial
+        moments at the aerodynamic panel target.  The returned matrix has the
+        same area-integrated units as C, so the existing force and adjoint
+        displacement routines remain applicable.
+
+        The equality constraints are solved independently per panel.  If a
+        target is outside the convex hull of the structural nodes touched by
+        that common-refinement panel, setup fails explicitly rather than
+        claiming a moment-conservative transfer that cannot be realized.
+        """
+        C = np.asarray(C, dtype=float)
+        areas = np.asarray(panel_areas, dtype=float).reshape(-1)
+        targets = np.asarray(panel_targets, dtype=float).reshape((-1, 2))
+        coords = np.asarray(dof_coords, dtype=float).reshape((-1, 2))
+        if C.shape != (coords.shape[0], areas.shape[0]):
+            raise ValueError("CRM matrix, panel areas, and structural coordinates have incompatible sizes")
+        if targets.shape[0] != areas.shape[0]:
+            raise ValueError("One physical target coordinate is required per CRM panel")
+
+        C_moment = np.zeros_like(C)
+        min_weight = np.inf
+        max_constraint_residual = 0.0
+        for panel_idx, (area, target) in enumerate(zip(areas, targets)):
+            if not np.isfinite(area) or area <= 0.0:
+                raise ValueError(f"CRM panel {panel_idx} has invalid area {area}")
+            weights_all = C[:, panel_idx] / area
+            support = np.flatnonzero(weights_all > 1.0e-14)
+            if support.size < 3:
+                raise ValueError(
+                    f"CRM panel {panel_idx} has only {support.size} active structural nodes; "
+                    "cannot constrain planar first moments"
+                )
+
+            points = coords[support]
+            # Center at the requested CP and scale each coordinate so the
+            # equality system is well conditioned even for small geometries.
+            scale = np.ptp(points, axis=0)
+            scale[scale <= 1.0e-14] = max(float(np.max(scale)), 1.0)
+            normalized = (points - target[None, :]) / scale[None, :]
+            Aeq = np.vstack((np.ones(support.size), normalized.T))
+            beq = np.array([1.0, 0.0, 0.0], dtype=float)
+            if np.linalg.matrix_rank(Aeq, tol=1.0e-12) < 3:
+                raise ValueError(
+                    f"CRM panel {panel_idx} support is geometrically degenerate; "
+                    "cannot preserve both in-plane moment components"
+                )
+
+            w0 = weights_all[support]
+
+            def objective(weights):
+                delta = weights - w0
+                return 0.5 * float(np.dot(delta, delta))
+
+            def objective_jac(weights):
+                return weights - w0
+
+            result = minimize(
+                objective,
+                w0,
+                jac=objective_jac,
+                method="SLSQP",
+                bounds=[(0.0, None)] * support.size,
+                constraints={
+                    "type": "eq",
+                    "fun": lambda weights: Aeq @ weights - beq,
+                    "jac": lambda weights: Aeq,
+                },
+                options={"ftol": 1.0e-13, "maxiter": 500, "disp": False},
+            )
+            corrected = np.asarray(result.x, dtype=float)
+            residual = Aeq @ corrected - beq
+            if (
+                not result.success
+                or not np.all(np.isfinite(corrected))
+                or float(np.min(corrected)) < -feasibility_tol
+                or float(np.linalg.norm(residual, ord=np.inf)) > feasibility_tol
+            ):
+                raise RuntimeError(
+                    f"Moment-constrained CRM failed for panel {panel_idx}: "
+                    f"success={result.success}, min_weight={np.min(corrected):.3e}, "
+                    f"constraint_residual={np.linalg.norm(residual, ord=np.inf):.3e}, "
+                    f"message={result.message}"
+                )
+
+            # Remove tiny optimizer-bound violations, then project once onto
+            # the equalities using the strictly positive active set. This
+            # tightens force/moment conservation close to floating precision.
+            corrected[corrected < 0.0] = 0.0
+            active = corrected > 1.0e-12
+            if np.count_nonzero(active) < 3 or np.linalg.matrix_rank(Aeq[:, active]) < 3:
+                raise RuntimeError(f"Moment-constrained CRM panel {panel_idx} lost equality rank")
+            delta = Aeq[:, active].T @ np.linalg.solve(
+                Aeq[:, active] @ Aeq[:, active].T,
+                beq - Aeq[:, active] @ corrected[active],
+            )
+            corrected[active] += delta
+            residual = Aeq @ corrected - beq
+            if float(np.min(corrected)) < -1.0e-12:
+                raise RuntimeError(
+                    f"CRM equality refinement failed for panel {panel_idx}: "
+                    f"negative corrected weight={np.min(corrected):.3e}"
+                )
+            corrected[corrected < 0.0] = 0.0
+            residual = Aeq @ corrected - beq
+            if float(np.linalg.norm(residual, ord=np.inf)) > 1.0e-11:
+                raise RuntimeError(
+                    f"CRM equality refinement failed for panel {panel_idx}: "
+                    f"constraint_residual={np.linalg.norm(residual, ord=np.inf):.3e}"
+                )
+
+            C_moment[support, panel_idx] = area * corrected
+            min_weight = min(min_weight, float(np.min(corrected)))
+            max_constraint_residual = max(
+                max_constraint_residual, float(np.linalg.norm(residual, ord=np.inf))
+            )
+
+        return C_moment, {
+            "minimum_active_weight": min_weight,
+            "maximum_constraint_residual": max_constraint_residual,
+        }
 
 
 __all__ = ["CommonRefinementMesh"]

@@ -54,6 +54,11 @@ SOLID_MESSAGE_TIMINGS = (
     "solid_solve_time",
     "solid_io_time",
     "solid_step_time",
+    # These diagnostics are included in the same geometry message as the
+    # timings above, so they describe the preceding solid step as well.
+    "cp_geometry_rms_error",
+    "cp_geometry_max_error",
+    "cp_geometry_relative_rms_error",
 )
 
 
@@ -96,6 +101,26 @@ def positive_for_log(values: np.ndarray, floor: float = 1.0e-18) -> np.ndarray:
     return np.where(np.isfinite(values), np.maximum(np.abs(values), floor), np.nan)
 
 
+def ewma(values: np.ndarray, span: int) -> np.ndarray:
+    """Exponentially weighted moving average, preserving missing-data gaps.
+
+    ``span`` uses the standard convention alpha = 2 / (span + 1).  The
+    average restarts after a NaN rather than bridging an unavailable sample.
+    """
+    if span < 1:
+        raise ValueError("EWMA span must be at least one")
+    alpha = 2.0 / (span + 1.0)
+    result = np.full_like(values, np.nan, dtype=float)
+    previous = np.nan
+    for index, value in enumerate(values):
+        if not np.isfinite(value):
+            previous = np.nan
+            continue
+        previous = value if not np.isfinite(previous) else alpha * value + (1.0 - alpha) * previous
+        result[index] = previous
+    return result
+
+
 def save(fig: plt.Figure, output_dir: Path, stem: str) -> None:
     fig.tight_layout()
     fig.savefig(output_dir / f"{stem}.png", dpi=220)
@@ -103,38 +128,59 @@ def save(fig: plt.Figure, output_dir: Path, stem: str) -> None:
     plt.close(fig)
 
 
-def plot_work(runs: list[tuple[str, dict[str, np.ndarray]]], output_dir: Path) -> None:
-    fig, axes = plt.subplots(2, 1, figsize=(8.2, 6.4), sharex=True)
+def plot_work(runs: list[tuple[str, dict[str, np.ndarray]]], output_dir: Path, ewma_span: int) -> None:
+    """Write the work audit and work defect as separate publication figures."""
+    fig, axis = plt.subplots(figsize=(8.2, 4.4))
     for label, data in runs:
         time = data["time"]
-        axes[0].plot(time, data["incremental_work_Wf"], label=f"{label}: $\Delta W_f$")
-        axes[0].plot(time, data["incremental_work_Ws"], "--", label=f"{label}: $\Delta W_s$")
-        axes[1].semilogy(time, positive_for_log(data["incremental_work_relative_error"]), label=label)
-    axes[0].set_ylabel("incremental work")
-    axes[0].set_title("Discrete virtual-work audit")
-    axes[0].legend(ncol=2, fontsize=8)
-    axes[1].set_xlabel("coupling time [s]")
-    axes[1].set_ylabel(r"$|\Delta W_f-\Delta W_s|/\max(|\Delta W_f|,|\Delta W_s|)$")
-    axes[1].set_title("relative work defect")
-    axes[1].grid(True, which="both", alpha=0.25)
-    save(fig, output_dir, "01_work_conservation")
+        axis.plot(time, data["incremental_work_Wf"], label=f"{label}: $\Delta W_f$")
+        axis.plot(time, data["incremental_work_Ws"], "--", label=f"{label}: $\Delta W_s$")
+    axis.set_xlabel("coupling time [s]")
+    axis.set_ylabel("incremental work")
+    axis.set_title("Discrete virtual-work audit")
+    axis.grid(True, alpha=0.25)
+    axis.legend(ncol=2, fontsize=8)
+    save(fig, output_dir, "01_incremental_work")
 
-
-def plot_balance(runs: list[tuple[str, dict[str, np.ndarray]]], output_dir: Path) -> None:
-    fig, axes = plt.subplots(2, 1, figsize=(8.2, 6.4), sharex=True)
+    fig, axis = plt.subplots(figsize=(8.2, 4.4))
     for label, data in runs:
         time = data["time"]
-        axes[0].semilogy(time, positive_for_log(data.get("force_transfer_relative_error", np.nan)), label=label)
-        axes[1].semilogy(time, positive_for_log(data.get("moment_transfer_relative_error", np.nan)), label=label)
-    axes[0].set_ylabel("relative force residual")
-    axes[0].set_title("Global force conservation")
-    axes[1].set_xlabel("coupling time [s]")
-    axes[1].set_ylabel("relative moment residual")
-    axes[1].set_title("Global moment conservation")
-    for axis in axes:
-        axis.grid(True, which="both", alpha=0.25)
-        axis.legend(fontsize=8)
-    save(fig, output_dir, "02_force_moment_conservation")
+        raw = positive_for_log(data["incremental_work_relative_error"])
+        axis.semilogy(time, raw, color="0.65", alpha=0.28, linewidth=0.65)
+        axis.semilogy(time, positive_for_log(ewma(raw, ewma_span)), label=f"{label}: EWMA ({ewma_span})")
+    axis.set_xlabel("coupling time [s]")
+    axis.set_ylabel(r"$|\Delta W_f-\Delta W_s|/\max(|\Delta W_f|,|\Delta W_s|)$")
+    axis.set_title(f"Relative work defect (EWMA span = {ewma_span}; raw trace in gray)")
+    axis.grid(True, which="both", alpha=0.25)
+    axis.legend(fontsize=8)
+    save(fig, output_dir, "02_relative_work_defect")
+
+
+def plot_balance(runs: list[tuple[str, dict[str, np.ndarray]]], output_dir: Path, ewma_span: int) -> None:
+    fig, axis = plt.subplots(figsize=(8.2, 4.4))
+    for label, data in runs:
+        time = data["time"]
+        raw_force = positive_for_log(data.get("force_transfer_relative_error", np.nan))
+        axis.semilogy(time, raw_force, color="0.65", alpha=0.28, linewidth=0.65)
+        axis.semilogy(time, positive_for_log(ewma(raw_force, ewma_span)), label=f"{label}: EWMA ({ewma_span})")
+    axis.set_xlabel("coupling time [s]")
+    axis.set_ylabel("relative force residual")
+    axis.set_title(f"Global force conservation (EWMA span = {ewma_span}; raw trace in gray)")
+    axis.grid(True, which="both", alpha=0.25)
+    axis.legend(fontsize=8)
+    save(fig, output_dir, "03_relative_force_residual")
+
+    fig, axis = plt.subplots(figsize=(8.2, 4.4))
+    for label, data in runs:
+        axis.semilogy(
+            data["time"], positive_for_log(data.get("moment_transfer_relative_error", np.nan)), label=label
+        )
+    axis.set_xlabel("coupling time [s]")
+    axis.set_ylabel("relative moment residual")
+    axis.set_title("Global moment conservation")
+    axis.grid(True, which="both", alpha=0.25)
+    axis.legend(fontsize=8)
+    save(fig, output_dir, "04_relative_moment_residual")
 
 
 def plot_timing(runs: list[tuple[str, dict[str, np.ndarray]]], output_dir: Path) -> None:
@@ -160,7 +206,7 @@ def plot_timing(runs: list[tuple[str, dict[str, np.ndarray]]], output_dir: Path)
         axis.set_yscale("log")
         axis.grid(True, which="both", alpha=0.25)
         axis.legend(fontsize=8, ncol=2)
-    save(fig, output_dir, "03_component_timing")
+    save(fig, output_dir, "07_component_timing")
 
 
 def plot_displacement_transfer_error(runs: list[tuple[str, dict[str, np.ndarray]]], output_dir: Path) -> None:
@@ -175,40 +221,43 @@ def plot_displacement_transfer_error(runs: list[tuple[str, dict[str, np.ndarray]
         for _, data in runs
     ):
         return
-    fig, axes = plt.subplots(2, 1, figsize=(8.2, 6.0), sharex=True)
+    fig, axis = plt.subplots(figsize=(8.2, 4.4))
     for label, data in runs:
         time = data["time"]
         if "cp_geometry_rms_error" in data:
-            axes[0].semilogy(time, positive_for_log(data["cp_geometry_rms_error"]), label=f"{label}: RMS")
+            axis.semilogy(time, positive_for_log(aligned(data, "cp_geometry_rms_error")), label=f"{label}: RMS")
         if "cp_geometry_max_error" in data:
-            axes[0].semilogy(time, positive_for_log(data["cp_geometry_max_error"]), "--", label=f"{label}: max")
+            axis.semilogy(time, positive_for_log(aligned(data, "cp_geometry_max_error")), "--", label=f"{label}: max")
+    axis.set_xlabel("coupling time [s]")
+    axis.set_ylabel("CP geometry error [m]")
+    axis.set_title("Solid-to-fluid displacement reconstruction at control points")
+    axis.grid(True, which="both", alpha=0.25)
+    handles, labels = axis.get_legend_handles_labels()
+    if handles:
+        axis.legend(fontsize=8)
+    if not any("cp_geometry_rms_error" in data for _, data in runs):
+        axis.text(0.5, 0.5, "CP displacement error was not logged in this legacy CSV.", transform=axis.transAxes, ha="center", va="center")
+    save(fig, output_dir, "05_cp_displacement_error")
+
+    fig, axis = plt.subplots(figsize=(8.2, 4.4))
+    for label, data in runs:
+        time = data["time"]
         if "cp_geometry_relative_rms_error" in data:
-            axes[1].semilogy(time, positive_for_log(data["cp_geometry_relative_rms_error"]), label=label)
+            axis.semilogy(time, positive_for_log(aligned(data, "cp_geometry_relative_rms_error")), label=label)
         elif "geometry_transfer_relative_error" in data:
-            axes[1].semilogy(
+            axis.semilogy(
                 time,
                 positive_for_log(data["geometry_transfer_relative_error"]),
                 label=f"{label}: legacy fluid-geometry echo",
             )
-    axes[0].set_ylabel("CP geometry error [m]")
-    axes[0].set_title("Solid-to-fluid displacement reconstruction at control points")
-    axes[1].set_xlabel("coupling time [s]")
-    axes[1].set_ylabel("relative displacement-transfer error")
-    for axis in axes:
-        axis.grid(True, which="both", alpha=0.25)
-        handles, labels = axis.get_legend_handles_labels()
-        if handles:
-            axis.legend(fontsize=8)
-    if not any("cp_geometry_rms_error" in data for _, data in runs):
-        axes[0].text(
-            0.5,
-            0.5,
-            "CP displacement error was not logged in this legacy CSV.",
-            transform=axes[0].transAxes,
-            ha="center",
-            va="center",
-        )
-    save(fig, output_dir, "03_displacement_transfer_error")
+    axis.set_xlabel("coupling time [s]")
+    axis.set_ylabel("relative displacement-transfer error")
+    axis.set_title("Relative solid-to-fluid displacement reconstruction error")
+    axis.grid(True, which="both", alpha=0.25)
+    handles, labels = axis.get_legend_handles_labels()
+    if handles:
+        axis.legend(fontsize=8)
+    save(fig, output_dir, "06_relative_cp_displacement_error")
 
 
 def plot_timing_comparison(runs: list[tuple[str, dict[str, np.ndarray]]], output_dir: Path) -> None:
@@ -233,25 +282,33 @@ def plot_timing_comparison(runs: list[tuple[str, dict[str, np.ndarray]]], output
     axis.set_ylabel("wall time [s]")
     axis.set_title("Timing distribution comparison (median and interquartile range)")
     axis.grid(True, axis="y", which="both", alpha=0.25)
-    save(fig, output_dir, "04_timing_distribution")
+    save(fig, output_dir, "10_timing_distribution")
 
 
 def plot_solver_health(runs: list[tuple[str, dict[str, np.ndarray]]], output_dir: Path) -> None:
-    fig, axes = plt.subplots(2, 1, figsize=(8.2, 6.0), sharex=True)
+    fig, axis = plt.subplots(figsize=(8.2, 4.4))
     for label, data in runs:
         time = data["time"]
         if "newton_iterations" in data:
-            axes[0].plot(time, data["newton_iterations"], label=label)
+            axis.plot(time, data["newton_iterations"], label=label)
+    axis.set_xlabel("coupling time [s]")
+    axis.set_ylabel("nonlinear iterations")
+    axis.set_title("Solid nonlinear-solver iterations")
+    axis.grid(True, which="both", alpha=0.25)
+    axis.legend(fontsize=8)
+    save(fig, output_dir, "08_newton_iterations")
+
+    fig, axis = plt.subplots(figsize=(8.2, 4.4))
+    for label, data in runs:
+        time = data["time"]
         if "newton_relative_residual" in data:
-            axes[1].semilogy(time, positive_for_log(data["newton_relative_residual"]), label=label)
-    axes[0].set_ylabel("nonlinear iterations")
-    axes[0].set_title("Solid nonlinear-solver health")
-    axes[1].set_xlabel("coupling time [s]")
-    axes[1].set_ylabel("relative residual")
-    for axis in axes:
-        axis.grid(True, which="both", alpha=0.25)
-        axis.legend(fontsize=8)
-    save(fig, output_dir, "05_nonlinear_solver_health")
+            axis.semilogy(time, positive_for_log(data["newton_relative_residual"]), label=label)
+    axis.set_xlabel("coupling time [s]")
+    axis.set_ylabel("relative residual")
+    axis.set_title("Solid nonlinear-solver relative residual")
+    axis.grid(True, which="both", alpha=0.25)
+    axis.legend(fontsize=8)
+    save(fig, output_dir, "09_newton_relative_residual")
 
 
 def plot_orchestrator_stages(runs: list[tuple[str, dict[str, np.ndarray]]], output_dir: Path) -> None:
@@ -277,7 +334,7 @@ def plot_orchestrator_stages(runs: list[tuple[str, dict[str, np.ndarray]]], outp
         axis.set_title(f"Coupling-server scheduling stages — {label}")
         axis.grid(True, which="both", alpha=0.25)
         axis.legend(fontsize=8, ncol=2)
-    save(fig, output_dir, "06_orchestrator_stage_timing")
+    save(fig, output_dir, "11_orchestrator_stage_timing")
 
 
 def write_summary(runs: list[tuple[str, dict[str, np.ndarray]]], output_dir: Path) -> None:
@@ -334,14 +391,20 @@ def main() -> None:
     parser.add_argument("csv", nargs="+", type=Path, help="one or more coupling-history CSV files")
     parser.add_argument("--labels", nargs="*", help="labels matching CSV order")
     parser.add_argument("--output-dir", type=Path, default=Path("plots/coupling_diagnostics"))
+    parser.add_argument(
+        "--ewma-span", type=int, default=25,
+        help="samples in the EWMA span for relative work-defect and force-residual plots (default: 25)",
+    )
     args = parser.parse_args()
     if args.labels and len(args.labels) != len(args.csv):
         parser.error("--labels must contain exactly one label per CSV")
+    if args.ewma_span < 1:
+        parser.error("--ewma-span must be at least one")
     labels = args.labels or [path.stem for path in args.csv]
     runs = [(label, read_csv(path)) for label, path in zip(labels, args.csv)]
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    plot_work(runs, args.output_dir)
-    plot_balance(runs, args.output_dir)
+    plot_work(runs, args.output_dir, args.ewma_span)
+    plot_balance(runs, args.output_dir, args.ewma_span)
     plot_displacement_transfer_error(runs, args.output_dir)
     plot_timing(runs, args.output_dir)
     plot_timing_comparison(runs, args.output_dir)

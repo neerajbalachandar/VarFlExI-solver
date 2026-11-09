@@ -14,8 +14,11 @@ span_sampling_mode: midpoint
 custom_span_stride: null
 
 force_transfer_mode: crm
+# Correct CRM panel weights to preserve the control point's first moment.
+# The force/displacement pair remains work-conjugate through the adjoint map.
+crm_moment_conservative: true
 # Geometry/displacement transfer to aerodynamic LE/TE stations.
-displacement_transfer_mode: rbf
+displacement_transfer_mode: crm
 rbf_radius: 0.03
 rbf_neighbors: 24
 # null disables component-wise force clipping; non-finite forces still error.
