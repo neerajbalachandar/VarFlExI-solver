@@ -126,6 +126,45 @@ function csv_write(path, header, rows)
     end
 end
 
+# Sample the Gaussian-erf velocity/vorticity at a few fixed probes directly.
+# Vvpm_on_Xs appends probes to the full particle field and invokes UJ_fmm,
+# which evaluates the complete O(N log N) particle field again for every
+# history callback. Direct summation at these three probes is O(3N) and leaves
+# the solver's FMM-based particle evolution and aerodynamic force calculation
+# unchanged.
+function sample_probe_fields(PFIELD, probes)
+    velocity = [zeros(3) for _ in probes]
+    vorticity = [zeros(3) for _ in probes]
+    inv4pi = 1.0 / (4.0*pi)
+    for i in 1:FLOWVPM.get_np(PFIELD)
+        particle = FLOWVPM.get_particle(PFIELD, i)
+        x = FLOWVPM.get_X(particle)
+        gamma = FLOWVPM.get_Gamma(particle)
+        sigma = FLOWVPM.get_sigma(particle)[]
+        for j in eachindex(probes)
+            probe = probes[j]
+            dx = probe[1] - x[1]
+            dy = probe[2] - x[2]
+            dz = probe[3] - x[3]
+            r2 = dx*dx + dy*dy + dz*dz
+            if !iszero(r2)
+                r = sqrt(r2)
+                r_sigma = r/sigma
+                velocity_scale = inv4pi * PFIELD.kernel.g(r_sigma) / (r2*r)
+                velocity[j][1] += velocity_scale * (gamma[2]*dz - gamma[3]*dy)
+                velocity[j][2] += velocity_scale * (gamma[3]*dx - gamma[1]*dz)
+                velocity[j][3] += velocity_scale * (gamma[1]*dy - gamma[2]*dx)
+            end
+            r_sigma = sqrt(r2)/sigma
+            omega_scale = FLOWVPM.zeta_gauserf(r_sigma) / sigma^3
+            vorticity[j][1] += gamma[1] * omega_scale
+            vorticity[j][2] += gamma[2] * omega_scale
+            vorticity[j][3] += gamma[3] * omega_scale
+        end
+    end
+    return velocity, vorticity
+end
+
 function run_case(casepath)
     case = JSON.parsefile(casepath)
     cfg = simple_yaml(case["fluid_config_path"])
@@ -164,7 +203,7 @@ function run_case(casepath)
         min_ncrit=Int(get(f,"minimum_ncrit",3)))
     viscous_name=lowercase(string(get(f,"viscous_scheme","CoreSpreading")))
     viscous=startswith(viscous_name,"corespreading") ?
-        FLOWVPM.CoreSpreading(nu,sigma0,1.0) : nothing
+        FLOWVPM.CoreSpreading(nu,sigma0,1.0) : FLOWVPM.Inviscid()
     refarea=span*cr
     qinf_reference=0.5*rho*U^2
     polar=strip(string(get(f,"section_polar","")))
@@ -184,6 +223,8 @@ function run_case(casepath)
         ["u_probe$(j)_$(k)" for j in 1:3 for k in ("x","y","z")],
         ["omega_probe$(j)_$(k)" for j in 1:3 for k in ("x","y","z")])
     rows=Vector{Vector{Any}}(); step=Ref(0); started=time()
+    progress_path=joinpath(case["case_output"],"progress.txt")
+    progress_interval=max(1,cld(nsteps,100))
     fmm_error=Ref(NaN); removed=Ref(0); inserted=Ref(0); lastcount=Ref(0)
     effective_fmm=Ref(fmm)
     function collect_history(sim, PFIELD, T, DT; optargs...)
@@ -208,12 +249,10 @@ function run_case(casepath)
         qinf=0.5*rho*sum(sum(abs2,Vinf([wing._xm[i],wing._ym[i],wing._zm[i]],T)) for i in 1:m)/m
         denom=max(qinf*refarea,1e-16)
         CL=lift/denom; CD=drag/denom
-        induced=isempty(probes) || np==0 ? [zeros(3) for _ in probes] : FLOWUnsteady.Vvpm_on_Xs(PFIELD,probes;dt=DT)
-        omega=[zeros(3) for _ in probes]
-        if np>0
-            for (j,X) in enumerate(probes), i in 1:np
-                dx=X-FLOWVPM.get_X(PFIELD,i); sig=FLOWVPM.get_sigma(PFIELD,i)[]
-                omega[j] .+= FLOWVPM.get_Gamma(PFIELD,i) .* (FLOWVPM.zeta_gauserf(norm(dx)/sig)/sig^3)
+        induced,omega=sample_probe_fields(PFIELD,probes)
+        if step[] == 1 || step[] % progress_interval == 0 || step[] == nsteps
+            open(progress_path,"w") do io
+                println(io,"samples=$(step[])/$(nsteps+1) physical_steps=$(max(step[]-1,0))/$nsteps particles=$np elapsed_s=$(round(time()-started;digits=1))")
             end
         end
         vals=Any[step[],T,np,time()-t0,lift,drag,CL,CD]
@@ -368,11 +407,27 @@ function main(args)
                     cp(joinpath(configdir,config_name),joinpath(cdir,"source_"*config_name);force=true)
                 end
                 casefile=joinpath(cdir,"case_config.json"); write_json(casefile,case)
+                ncase_steps=round(Int,Float64(case["duration"])/Float64(case["dt"]))
+                println("[$study] START $id | dt=$(case["dt"]) s duration=$(case["duration"]) s steps=$ncase_steps n_span=$(case["n_span"]) particles_per_step=$(case["particles_per_step"]) | log=$(joinpath(cdir,"stderr.log"))")
+                flush(Base.stdout)
+                progress_path=joinpath(cdir,"progress.txt")
+                isfile(progress_path) && rm(progress_path)
                 cmd=`$(Base.julia_cmd()) --project=$PROJECT $(@__FILE__) --internal-case $casefile`
                 stdout=open(joinpath(cdir,"stdout.log"),"w"); stderr=open(joinpath(cdir,"stderr.log"),"w")
                 started=time(); code=0
                 try
                     proc=run(pipeline(cmd,stdout=stdout,stderr=stderr);wait=false)
+                    last_progress=""; last_wait_notice=time()
+                    while process_running(proc)
+                        sleep(10)
+                        progress_path=joinpath(cdir,"progress.txt")
+                        progress=isfile(progress_path) ? strip(read(progress_path,String)) : "initializing"
+                        if progress != last_progress || time()-last_wait_notice >= 60
+                            println("[$study] RUNNING $id | $progress")
+                            flush(Base.stdout)
+                            last_progress=progress; last_wait_notice=time()
+                        end
+                    end
                     wait(proc); code=proc.exitcode
                 catch err
                     code=1; write(stderr,"\nDriver failure: $(sprint(showerror,err))\n")
@@ -389,6 +444,11 @@ function main(args)
                 println("[$study] $(entry["status"]) $id ($(round(entry["runtime_s"];digits=1)) s)")
             end
         end
+        failed = [(study, entry["case_id"]) for study in studies
+            for entry in JSON.parsefile(joinpath(out, study, "manifest.json"))["cases"]
+            if entry["status"] != "COMPLETE"]
+        isempty(failed) || error("Fluid refinement cases failed: " *
+            join(["$study/$case_id" for (study, case_id) in failed], ", "))
     else
         for study in studies
             study in ("particles","time","core","panels","fmm","wake") || error("Unknown study $study")

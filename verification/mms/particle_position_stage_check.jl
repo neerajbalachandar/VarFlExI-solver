@@ -3,6 +3,7 @@
 
 import FLOWVPM as vpm
 using LinearAlgebra
+using JSON
 include(joinpath(@__DIR__, "..", "..", "fluid", "src", "mms_rk3.jl"))
 
 function make_field(integration=vpm.rungekutta3; nu=0.02, beta=100.0, gamma=[0.0, 0.0, 0.0])
@@ -61,6 +62,20 @@ core_spreading_error = abs(native_sigma - reference_sigma)
 core_spreading_error <= 1e-14 || error("zero-source path changed core spreading: $core_spreading_error")
 core_reset_error = abs(reference.viscous.t_sgm)
 core_reset_error <= 1e-14 || error("test did not exercise the native core reset: $core_reset_error")
+
+mkpath(joinpath(@__DIR__, "results"))
+open(joinpath(@__DIR__, "results", "particle_position_stage_check.json"), "w") do io
+    JSON.print(io, Dict(
+        "status" => "PASS",
+        "position_error" => position_error,
+        "circulation_error" => circulation_error,
+        "core_source_error" => core_error,
+        "source_disabled_error" => source_disabled_error,
+        "core_spreading_error" => core_spreading_error,
+        "core_reset_error" => core_reset_error,
+        "stage_times_s" => [row.time for row in trace],
+    ), 2)
+end
 
 println("status=PASS")
 println("verification_level=fixed-population discrete particle-state RK3 component with native core spreading")

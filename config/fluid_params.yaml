@@ -1,21 +1,42 @@
-run_name: rect_nonlinear_regime
-particles_per_step: 4
-save_every: 2
+run_name: 06-11-crm
+# Vahana uses 5 wake particles per shed segment and step. This improves wake
+# resolution and reduces sigma_vpm_overwrite at fixed dt and freestream speed.
+particles_per_step: 3
+save_every: 1
 
-aoa_deg: 3.0
-vinf: 25.0
+aoa_deg: 5.0
 rho: 1.225
 nu: 1.5e-05
 
 # V(x,t) = V0 + G*(x-x_ref) + cyclic transverse sinusoidal gust.
 # Gust amplitudes are m/s, wavenumbers are rad/m; this deterministic gust is
 # not a substitute for resolved turbulence or an LES inflow.
-freestream_gradient: [0, 0, 0, 0, 0, 0, 0, 0, 0]
-freestream_oscillation: [2.0, 1.5, 1.0]
-freestream_wavenumber: [2.0, 1.5, 1.0]
-freestream_frequency_hz: 0.7
-freestream_phase_deg: 0.0
+vinf: 15.0
+
+# 1. Add spatial shear (linear velocity variations across the inlet)
+# Example: Mean flow increases with height (z) to simulate a boundary layer
+freestream_gradient: [0, 0, 0,  0, 0, 0,  0.0, 0.0, 0.0] 
+
+# 2. Oscillate all three components (u, v, w) instead of just z
+# Introduces surge (x), sway (y), and heave (z) velocity variations
+# freestream_oscillation: [1.5, 1.0, 2.5]
+freestream_oscillation: [0, 0, 0]
+
+# 3. Create cross-axis coupling 
+# Changing the wavenumber vector forces the wave to travel diagonally across the mesh
+# freestream_wavenumber: [0.7, 0.3, 0.2]
+freestream_wavenumber: [0, 0, 0]
+
+# 4. Use a non-integer frequency 
+# Prevents clean harmonic locking with typical solver time steps
+freestream_frequency_hz: 0.0
+
+# 5. Shift the phase
+# Shifts the wave origin away from the absolute coordinate center
+freestream_phase_deg: 0.0  
+
 freestream_reference: [0, 0, 0]
+
 
 # Empty polar disables parasitic drag; provide a validated sectional polar to enable it.
 section_polar: ""
@@ -30,6 +51,8 @@ twist_root: 0.0
 twist_tip: 0.0
 dihedral: 0.0
 
+# Keep the VLM span stations aligned with coupling.comm_nspan and the structural
+# span mesh. setup.jl validates this interface shape before starting the run.
 n_span: 80
 n_chord: 1
 eta_cp: 0.75
@@ -39,13 +62,18 @@ x: 1.0
 y: 1.0
 z: 1.0
 
-lambda_vpm: 2.0
-remove_every: 100
-sphere_factor: 200.0
-# Disable strength and core-size pruning while diagnosing wake truncation.
-# The solver's distant spherical cleanup remains enabled (at sphere_factor).
-min_factor: 0.0
-max_factor: 1.0e12
+lambda_vpm: 2.125
+remove_every: 1
+# Retain a finite near wake while avoiding the very large 200-span cutoff.
+# This truncates far-wake history and can affect long-memory aerodynamic loads.
+sphere_factor: 50.0
+# Keep weak wake filaments (important around the low-dGamma midspan region),
+# cap anomalously strong filaments, and use Vahana-like core-size bounds.
+# Strength factors use this solver's reference-strength scale.
+strength_min_factor: 1.0e-5
+strength_max_factor: 2.0
+sigma_min_factor: 0.1
+sigma_max_factor: 5.0
 
 wake_coupled: true
 start_with_wake: true
@@ -55,7 +83,7 @@ omit_rows: []
 
 relaxation: 0.35
 sigma_solver: -1
-sigma_surface: 0.025
+sigma_surface: 0.0025
 
 p: 4
 ncrit: 50
@@ -70,10 +98,10 @@ autotune_regularization: false
 default_rho_over_sigma: 1.0
 minimum_ncrit: 3
 
-viscous_scheme: CoreSpreading
+viscous_scheme: none
 vpm_sfs: none
 
-save_directory: results/rect_nonlinear_regime/fluid/
+save_directory: results/06-11-crm/fluid/
 create_directory: true
 create_savepath: true
 prompt: false
@@ -83,6 +111,6 @@ print_solver_info: true
 save_geometry_csv: true
 save_force_history: true
 save_diagnostics: true
-save_horseshoes: true
+save_horseshoes: false
 regularize_vlm: true
-nsteps_save: 2
+nsteps_save: 1

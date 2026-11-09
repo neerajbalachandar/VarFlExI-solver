@@ -1,3 +1,5 @@
+include(joinpath(@__DIR__, "visualization_metadata.jl"))
+
 uns.run_simulation(simulation, nsteps;
     Vinf=Vinf,
     rho=rho,
@@ -35,6 +37,8 @@ uns.run_simulation(simulation, nsteps;
     nsteps_save=nsteps_save,
     save_horseshoes=save_horseshoes
 )
+
+write_visualization_time_metadata(save_path, run_name, Float64(dt))
 
 if mms_state_source_enabled
     mms_stage_path = joinpath(save_path, run_name * "_mms_rk3_stage_history.csv")
@@ -86,17 +90,24 @@ end
 
 station_path = joinpath(save_path, run_name * "_aerodynamic_station_history.csv")
 open(station_path, "w") do io
-    println(io, "step,time_s,station,x_cp_m,y_cp_m,z_cp_m,bound_circulation_m2_s,fx_N,fy_N,fz_N,lift_N,drag_N,moment_y_Nm,cl_section,cd_section,cm_section")
+    println(io, "step,time_s,station,x_cp_m,y_cp_m,z_cp_m,bound_circulation_m2_s,fx_N,fy_N,fz_N,lift_N,drag_N,moment_y_Nm,cl_section,cd_section,cm_section,section_chord_pitch_deg,structural_aoa_deg")
     for rec in force_payload_history
         forces = rec["force"]
         points = rec["geometry_cp_absolute"]
+        leading_edges = rec["geometry_le_absolute"]
+        trailing_edges = rec["geometry_te_absolute"]
         gamma = rec["bound_circulation"]
         my = rec["station_moment_y_Nm"]
         cls, cds, cms = rec["station_cl"], rec["station_cd"], rec["station_cm"]
         for i in eachindex(forces)
             f, p = forces[i], points[i]
+            le, te = leading_edges[i], trailing_edges[i]
+            # Structural chord pitch in the x-z plane, and its AoA contribution
+            # for a reference freestream along +x. Angles are degrees.
+            pitch_deg = rad2deg(atan(te[3] - le[3], te[1] - le[1]))
+            aoa_deg = -pitch_deg
             vals = (rec["step"], rec["fluid_time_s"], i, p[1], p[2], p[3], gamma[i],
-                    f[1], f[2], f[3], f[3], -f[1], my[i], cls[i], cds[i], cms[i])
+                    f[1], f[2], f[3], f[3], -f[1], my[i], cls[i], cds[i], cms[i], pitch_deg, aoa_deg)
             println(io, join(vals, ","))
         end
     end

@@ -1,5 +1,7 @@
-total_time: 5.0
-n_steps: 5000
+total_time: 1.5
+# Faster exploratory run: dt = 1.5 / 600 = 0.0025 s.
+# This is a coarser temporal discretization than the 6000-step run.
+n_steps: 600
 
 host: 127.0.0.1
 port: 9000
@@ -27,8 +29,10 @@ max_abs_force_component: null
 enforce_chord_projection: false
 enforce_span_projection: false
 
-force_relax: 0.5
-geom_relax: 0.5
+force_relax: 1.0
+geom_relax: 1.0
+force_change_warning_relative: 0.5
+force_change_warning_interval: 20
 epsilon_reg: 1.0e-16
 
 debug_io: null

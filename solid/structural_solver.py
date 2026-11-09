@@ -88,6 +88,9 @@ class StructuralSolver:
         self.mms_target_path = mms_target_path
         self.mms_output = mms_output
         self.mms_target = None
+        # The residual assembly is shared by ordinary and MMS solves; keep
+        # the optional source unset for normal runs as well as MMS runs.
+        self.mms_rhs_source = None
         self._newton_step_stats = {}
 
         self._setup_simulation_data()
@@ -110,11 +113,16 @@ class StructuralSolver:
             self.model.q_old.assign(_target_function(self.model, self.mms_target, 0.0, 0, self.mms_spaces))
             self.model.v_old.assign(_target_function(self.model, self.mms_target, 0.0, 1, self.mms_spaces))
             self.model.a_old.assign(_target_function(self.model, self.mms_target, 0.0, 2, self.mms_spaces))
-            self.mms_rhs_source = None
             out = self.mms_output or self.out_dir
             os.makedirs(out, exist_ok=True)
-            self.mms_history = open(os.path.join(out, "solid_mms_history.csv"), "w", encoding="utf-8")
-            self.mms_history.write("step,time_s,target_force,numerical_force,target_state,numerical_state,state_error_l2,source_l2\n")
+            self.mms_history = open(
+                os.path.join(out, "solid_mms_history.csv"), "w", newline="", encoding="utf-8"
+            )
+            self.mms_history_writer = csv.writer(self.mms_history)
+            self.mms_history_writer.writerow((
+                "step", "time_s", "target_force", "numerical_force", "target_state",
+                "numerical_state", "state_error_l2", "source_l2",
+            ))
 
     def _setup_simulation_data(self):
         self.T = float(self.coupling_config["total_time"])
@@ -150,7 +158,11 @@ class StructuralSolver:
             span_sampling_mode=cfg_get(
                 self.solid_config,
                 "span_sampling_mode",
-                default=cfg_get(self.coupling_config, "span_sampling", default="node-stride"),
+                default=cfg_get(
+                    self.coupling_config,
+                    "span_sampling_mode",
+                    default=cfg_get(self.coupling_config, "span_sampling", default="node-stride"),
+                ),
             ),
             span_custom_stride=cfg_get(
                 self.coupling_config,
@@ -241,6 +253,11 @@ class StructuralSolver:
                 default=os.getenv("SOLID_FORCE_RAMP_ITERS", "8"),
             )
         )
+        self.newton_max_load_subdivisions = int(
+            cfg_get(self.solid_config, "newton_max_load_subdivisions", default=5)
+        )
+        if self.newton_max_load_subdivisions < 0:
+            raise ValueError("newton_max_load_subdivisions must be nonnegative")
         self.force_relax = cfg_get(self.coupling_config, "force_relax", default=1.0)
         self.nonlinear_solver = str(
             cfg_get(self.solid_config, "nonlinear_solver", default="newton_linesearch")
@@ -593,21 +610,60 @@ class StructuralSolver:
         )
 
     def _solve_newton_step(self, ext_force_vec):
-        """Solve the step with fixed-load Newton stages and globalization."""
+        """Solve the step with bounded adaptive load continuation.
+
+        A failed continuation stage restores its starting displacement and
+        bisects that load interval. This gives Newton a closer initial guess
+        without changing the physical time step or accepting a nonconverged
+        state.
+        """
         self._newton_stage_stats = []
         n_load_stages = max(1, self.force_ramp_iters)
         regularization_lambda = self.regularized_newton_initial_lambda
-        for stage in range(1, n_load_stages + 1):
-            load_factor = float(stage) / float(n_load_stages)
-            regularization_lambda = self._solve_nonlinear_load_stage(
-                ext_force_vec, load_factor, regularization_lambda
-            )
+        pending = [(float(stage) / float(n_load_stages), 0)
+                   for stage in range(1, n_load_stages + 1)]
+        current_load_factor = 0.0
+        load_subdivisions = 0
+        while pending:
+            load_factor, subdivision_depth = pending.pop(0)
+            stage_start = self.model.q.vector().get_local().copy()
+            try:
+                regularization_lambda = self._solve_nonlinear_load_stage(
+                    ext_force_vec, load_factor, regularization_lambda
+                )
+            except RuntimeError as exc:
+                self.model.q.vector().set_local(stage_start)
+                self.model.q.vector().apply("insert")
+                if subdivision_depth >= self.newton_max_load_subdivisions:
+                    raise RuntimeError(
+                        f"Newton continuation failed at load_factor={load_factor:.6g} "
+                        f"after {load_subdivisions} load-interval subdivisions; "
+                        "state restored to the start of the failed interval"
+                    ) from exc
+                midpoint = 0.5 * (current_load_factor + load_factor)
+                if midpoint <= current_load_factor or midpoint >= load_factor:
+                    raise RuntimeError(
+                        f"Newton continuation cannot subdivide load interval "
+                        f"[{current_load_factor:.6g}, {load_factor:.6g}]"
+                    ) from exc
+                load_subdivisions += 1
+                print(
+                    f"Newton continuation retry: step load interval "
+                    f"[{current_load_factor:.6g}, {load_factor:.6g}] failed; "
+                    f"subdividing at {midpoint:.6g} "
+                    f"({load_subdivisions}/{self.newton_max_load_subdivisions} retries)"
+                )
+                pending.insert(0, (load_factor, subdivision_depth + 1))
+                pending.insert(0, (midpoint, subdivision_depth + 1))
+                continue
+            current_load_factor = load_factor
         stages = self._newton_stage_stats
         self._newton_step_stats = {
             "iterations": sum(stage["iterations"] for stage in stages),
             "residual_norm": stages[-1]["residual_norm"] if stages else float("nan"),
             "relative_residual": stages[-1]["relative_residual"] if stages else float("nan"),
             "load_stages": len(stages),
+            "load_subdivisions": load_subdivisions,
         }
 
     def _sample_state_history(self, step, time_s, energies, strain_rms, strain_max, stress_max):
@@ -720,11 +776,16 @@ class StructuralSolver:
                 )
                 tgt_state = tgt_func.vector().get_local()
                 srcnorm = self.mms_rhs_source.norm("l2") if self.mms_rhs_source is not None else 0.0
-                self.mms_history.write(
-                    f"{i_step+1},{physical_time:.16e},{json.dumps(data.get('target_force', []))},"
-                    f"{json.dumps(data.get('force', []))},{json.dumps(tgt_state.tolist())},"
-                    f"{json.dumps(num_state.tolist())},{np.linalg.norm(num_state-tgt_state):.16e},{srcnorm:.16e}\n"
-                )
+                self.mms_history_writer.writerow((
+                    i_step + 1,
+                    f"{physical_time:.16e}",
+                    json.dumps(data.get("target_force", [])),
+                    json.dumps(data.get("force", [])),
+                    json.dumps(tgt_state.tolist()),
+                    json.dumps(num_state.tolist()),
+                    f"{np.linalg.norm(num_state-tgt_state):.16e}",
+                    f"{srcnorm:.16e}",
+                ))
                 self.mms_history.flush()
             solid_solve_time = perf_counter() - solid_solve_start
             self.solid_solve_times[i_step] = solid_solve_time
@@ -849,15 +910,16 @@ class StructuralSolver:
             self.membrane_stress_max[i_step] = membrane_stress_max
             self.model.sig.assign(stress_field)
             solid_io_start = perf_counter()
-            self.xdmf_file.write(self.model.q, t)
-            # The mixed Reissner-Mindlin state has value dimension five
-            # (in-plane displacement[2], transverse displacement, rotation[2]);
-            # DOLFIN's legacy VTK writer cannot serialize that mixed vector.
-            # Export the physical three-component displacement to the PVD.
+            # The mixed Reissner-Mindlin state has five components with
+            # different physical units (in-plane displacement, transverse
+            # displacement, and rotations). Export only physical displacement
+            # as a three-component vector so XDMF/ParaView cannot interpret
+            # the mixed state as a displacement field.
             plate_displacement = project(
                 self.model.displacement_3d(self.model.q), self.model.Vt
             )
             plate_displacement.rename("PlateDisplacement", "")
+            self.xdmf_file.write(plate_displacement, t)
             self.q_pvd << (plate_displacement, t)
             self.sig_pvd << (self.model.sig, t)
             solid_io_time = perf_counter() - solid_io_start

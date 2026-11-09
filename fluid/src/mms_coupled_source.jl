@@ -206,7 +206,11 @@ function make_coupled_mms_source(target::CoupledMMSTarget, pfield)
     """
     n = length(target.ids)
     cache = Dict{Float64,Any}()
-    shadow_memory = [zeros(8) for _ in 1:n]
+    # FLOWVPM's low-storage particle memory includes the native RK state,
+    # core-spreading accumulator, and remap bookkeeping. Its size is an
+    # implementation detail of the installed FLOWVPM version, so match the
+    # actual runtime particle memory instead of assuming a fixed length.
+    shadow_memory = Vector{Vector{Float64}}()
     stage_c = (0.0, 1.0/3.0, 3.0/4.0)
     stage_next_c = (1.0/3.0, 3.0/4.0, 1.0)
 
@@ -214,8 +218,11 @@ function make_coupled_mms_source(target::CoupledMMSTarget, pfield)
         stage_idx = findfirst(c -> isapprox(stage_time, active_field.t + c*dt; atol=1e-9, rtol=1e-8), stage_c)
         stage_idx === nothing && error("MMS source stage time does not match FLOWVPM RK3 abscissae")
         if stage_idx == 1
-            for memory in shadow_memory
-                fill!(memory, 0.0)
+            empty!(shadow_memory)
+            for j in 1:n
+                slot = Int(mms_target_start[]) + j - 1
+                native_memory = vpm.get_M(vpm.get_particle(active_field, slot))
+                push!(shadow_memory, zeros(length(native_memory)))
             end
         end
         t0 = Float64(active_field.t)
@@ -275,15 +282,20 @@ function make_coupled_mms_source(target::CoupledMMSTarget, pfield)
         if !mms_target_seeded[]
             return (position=zeros(3), circulation=zeros(3), core=0.0)
         end
-        vpm.get_np(active_field) >= n || error("fixed-population MMS target particles are missing")
         first_target = Int(mms_target_start[])
         first_target > 0 || error("fixed-population MMS particle IDs have not been seeded")
-        dynamic_count = count(i -> !vpm.is_static(vpm.get_particle(active_field, i)),
-                              1:vpm.get_np(active_field))
-        dynamic_count == n || error("fixed-population MMS particle count changed")
         slot = Int(particle_slot)
         target_slot = slot - first_target + 1
-        1 <= target_slot <= n || error("no immutable MMS particle ID for slot $slot")
+        # FLOWUnsteady may maintain other native dynamic particles in the same
+        # production field. They are not members of this prescribed MMS
+        # population and must continue through the unmodified native update.
+        1 <= target_slot <= n || return (
+            position=zeros(3), circulation=zeros(3), core=0.0,
+        )
+        first_target + n - 1 <= vpm.get_np(active_field) ||
+            error("fixed-population MMS target particle slots are missing")
+        all(j -> !vpm.is_static(vpm.get_particle(active_field, first_target+j-1)), 1:n) ||
+            error("a fixed-population MMS target particle became static")
         particle_id = target.ids[target_slot]
         idx = get(target.id_to_slot, particle_id, 0)
         idx == target_slot || error("MMS immutable particle ID mapping is inconsistent")

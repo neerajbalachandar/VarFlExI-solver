@@ -1,17 +1,18 @@
 span: 0.96
 root_chord: 0.24
 tip_chord: 0.24
-# A 2%-chord plate with a 10 MPa material gives large but bounded deflection
-# under the 25 m/s load; geometric stiffening keeps the response finite.
+# Keep the geometry, material, and nonlinear model fixed. The reduced mesh
+# below is a faster exploratory discretization and should be refined for
+# quantitative structural results.
 thickness_ratio: 0.02
 leading_edge_sweep: 0.0
 
-nx: 30
-ny: 160
+nx: 15
+ny: 80
 
-results_root: results/rect_nonlinear_regime/
+results_root: results/06-11-crm/
 output_dir: solid/
-output_run_name: rect_nonlinear_regime
+output_run_name: 06-11-crm
 
 xdmf_filename: elastodynamics-results.xdmf
 mesh_pvd_filename: solid_mesh.pvd
@@ -19,9 +20,9 @@ q_pvd_filename: plate_state.pvd
 sig_pvd_filename: membrane_stress.pvd
 diag_csv_filename: solid_v18_diagnostics.csv
 
-E: 1.0e7
-nu: 0.30
-rho_s: 1200.0
+E: 5.0e9
+nu: 0.33
+rho_s: 1600.0
 
 eta_m: 1.2
 eta_k: 5.0e-5
@@ -36,9 +37,9 @@ include_quadratic_inplane_strain: true
 alpha_m: 0.1
 alpha_f: 0.2
 
-newton_atol: 1.0e-8
-newton_rtol: 1.0e-6
-newton_maxiter: 20
+newton_atol: 1.0e-6
+newton_rtol: 1.0e-4
+newton_maxiter: 100
 # Exact Newton with Armijo backtracking is the default.  The alternative
 # regularizes the Newton tangent as J + lambda*K_ref after rejected trials.
 nonlinear_solver: newton_linesearch
@@ -50,4 +51,5 @@ regularized_newton_lambda_decay: 0.25
 regularized_newton_max_attempts: 8
 
 # Number of fixed-load continuation stages, not Newton iterations.
-force_ramp_iters: 1
+force_ramp_iters: 10
+newton_max_load_subdivisions: 5
