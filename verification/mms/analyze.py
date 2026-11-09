@@ -160,10 +160,9 @@ def main():
                 if qoi in cur:
                     record[qoi + "_error"], record[qoi + "_error_type"] = relative_integrated_error(
                         cur["time_s"], cur[qoi], ref["time_s"], ref[qoi])
-            if study == "panels":
-                record["Gamma_space_time_error"], record["Gamma_error_type"] = relative_space_time_error(cur, ref, nspan_ref, ref["time_s"])
-            else:
-                record["Gamma_space_time_error"], record["Gamma_error_type"] = relative_space_time_error(cur, ref, nspan_ref, ref["time_s"])
+            record["Gamma_space_time_error"], record["Gamma_error_type"] = relative_space_time_error(
+                cur, ref, nspan_ref, ref["time_s"]
+            )
             rows.append(record)
         if study in ("time", "particles", "panels"):
             refine_key = {"time": "dt_s", "particles": "particles_per_step", "panels": "n_span"}[study]

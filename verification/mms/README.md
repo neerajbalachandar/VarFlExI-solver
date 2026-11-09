@@ -62,13 +62,13 @@ This distinction matters because a successful run alone does not establish that 
 
 The coupled verification has three parts.
 
-**Target and source checks** verify that the analytical target can be serialized, recovered, differentiated, and used to construct the structural manufactured source. The Julia-side check also verifies that the target manifest and the relevant production source hooks can be loaded.
+**Target and source checks** verify that the analytical target can be serialized, recovered, differentiated, and used to construct the structural manufactured source. `checks_coupled_solid.py` evaluates the production structural residual at the analytical target under the analytical panel force transferred by `ReferenceForceFunctional`; it does not add a manufactured source to make the residual vanish. The Julia-side check also verifies that the target manifest and the relevant production source hooks can be loaded.
 
-**Production coupling checks** execute short socket-coupled cases and verify that the structural and fluid histories are generated, the manufactured source is active, and the expected RK3 stage records and particle evolution are present. A baseline case is also compared against a source-enabled target case.
+**Production coupling checks** execute short socket-coupled cases and verify that the structural and fluid histories are generated, the manufactured source is active, and the expected RK3 stage records and particle evolution are present. `checks_coupled_smoke.py` compares baseline and source-enabled target cases. `checks_transfer_mms.py` evaluates the production CRM and RBF geometry/load transfers on the analytical target, checking the exposed CRM Galerkin load operator or the RBF conservation invariant together with virtual-work consistency.
 
 **Coupled refinement** repeats the production coupled simulation at different temporal and spatial resolutions. Every simulation is compared against the analytical target, and relative space-time L2 errors are computed for structural state, particle position, particle circulation, particle core, bound circulation, panel force, probe velocity, and probe vorticity.
 
-The scope of this study is deliberately restricted to a fixed particle population. It does not exercise native particle insertion, shedding, or deletion. It also does not establish general conservation properties of the Common Refinement Method (CRM) or RBF transfer operators. The moving-interface transfer check provides additional component-level evidence, but it should not be interpreted as a general proof of work conservation.
+The scope of this study is deliberately restricted to a fixed particle population. Bound circulation is checked against the target VLM residual and is not forced. The CRM transfer operator is machine-precision on the target, while RBF use contributes an interpolation floor. The resulting coupled error includes the VLM solution error and, where applicable, the RBF interpolation floor; it is not a continuum Navier–Stokes error. The study does not exercise native particle insertion, shedding, or deletion, and the transfer checks do not establish general CRM/RBF conservation outside their tested target states.
 
 The coupled MMS therefore provides evidence that the implemented discrete structural source, fluid source, transfer, and communication paths behave consistently with the prescribed target. It should not be presented as a continuum Navier–Stokes MMS or as a complete verification of every physical and numerical mechanism in the FSI solver.
 
@@ -82,15 +82,15 @@ The files in this directory are grouped below according to the part of the verif
 | `coupled_solid_source.py` | Constructs the structural manufactured source using the production weak form and generalized-α stage values. It also defines the reference aerodynamic force functional used in the structural source calculation. |
 | `run_coupled_mms.py` | Executes one source-enabled production socket-coupled case and records the analytical target and numerical histories. It is intended as a short smoke test, not as a convergence study. |
 | `run_coupled_refinement.py` | Executes the temporal and spatial coupled refinement levels, compares each simulation with its analytical target, and writes the relative errors and adjacent-level observed orders. |
-| `plot_coupled_refinement.py` | Generates the coupled refinement error plots, plots numerical histories against their targets, and writes a separate table of pairwise observed orders. This script is run after the refinement driver and is not currently invoked automatically by `run_pipeline.sh`. |
+| `plot_coupled_refinement.py` | Generates the coupled refinement error plots, plots numerical histories against their targets, and writes a separate table of pairwise observed orders. The full coupled pipeline invokes it after the refinement driver. |
 
-### Coupled implementation checks
+### Coupled implementation and analytical target checks
 
-| `checks_manifest_loading.py` | Runs the G0 end-to-end source check using baseline and target coupled simulations. It verifies that the target source is active, that the production RK3 stages are recorded, and that the numerical particle state evolves. It launches the solvers. |
+| `checks_target.py` | Merged target serialization and derivative check. It verifies that the shared analytical target round-trips through JSON and that its analytical derivatives agree with finite differences. |
+| `checks_coupled_smoke.py` | Renamed G0 source-active production coupling smoke check. It runs baseline and target coupled simulations, verifies the active source at every RK3 stage, and checks that the numerical particle state evolves independently. It launches the solvers. |
 | `checks_manifest_loading.jl` | Loads the target manifest and checks the relevant production Julia source hooks. This is a source and manifest preflight; it does not execute a simulation. |
-| `checks_target_roundtrip.py` | Checks that the analytical target can be serialized and recovered without changing its prescribed values. |
-| `checks_target_derivatives.py` | Compares analytical target derivatives with finite-difference approximations to check their implementation. |
-| `checks_coupled_solid.py` | Checks the identity between the structural manufactured source and the target residual using the production structural weak form. |
+| `checks_coupled_solid.py` | Checks that the analytical target satisfies the production structural residual under the target force transferred from the analytical panel force. |
+| `checks_transfer_mms.py` | Checks CRM and RBF geometry/load transfer metrics and virtual-work consistency for the coupled analytical target. |
 
 ### Standalone structural MMS
 
@@ -162,7 +162,7 @@ The remaining fluid studies can be executed separately using `run_refinement.jl`
 
 The coupled stage first generates the shared analytical target manifest. The Julia manifest check then verifies that the target can be loaded and that the required production source hooks are present.
 
-Next, the pipeline executes a short source-enabled socket-coupled smoke test. This checks that the structural and fluid solvers communicate and generate the expected histories. It is followed by the G0 source-active production check, which runs baseline and target cases and verifies that the manufactured source is actually applied during the production integration stages.
+Next, the pipeline executes a short source-enabled socket-coupled smoke test. This checks that the structural and fluid solvers communicate and generate the expected histories. It is followed by the renamed G0 source-active production check, `checks_coupled_smoke.py`, which runs baseline and target cases and verifies that the manufactured source is actually applied during the production integration stages. The transfer MMS check then records CRM/RBF target geometry, load, and virtual-work metrics.
 
 Finally, the coupled temporal and spatial refinement cases are executed. Each level is compared against the analytical target, and the errors and adjacent-level observed orders are written to the coupled refinement report.
 
@@ -174,10 +174,13 @@ To execute only one stage, pass its name instead of `all`.
 ./verification/mms/run_pipeline.sh preflight
 ./verification/mms/run_pipeline.sh plate
 ./verification/mms/run_pipeline.sh fluid
+./verification/mms/run_pipeline.sh coupled_quick
 ./verification/mms/run_pipeline.sh coupled
 ```
 
 These commands run the selected stage directly. They do not execute the preceding stages automatically.
+
+`coupled_quick` runs the merged target check, one source-enabled coupled smoke case, the source-active G0 smoke check, and the CRM/RBF transfer MMS check. It omits the Julia manifest preflight, temporal/spatial refinement, and plotting stages.
 
 ### Environment configuration
 
@@ -304,6 +307,8 @@ results/pipeline/
 ```
 
 The smoke directory contains the short coupled simulation histories, process logs, and coupling records. The G0 directory contains the results of the end-to-end source-active production check.
+
+Each case in `coupled_refinement_report.json` and `.csv` includes `structural_error_with_target_force`, which is the same analytical-target structural space-time L2 error reported as `structural_state_relative_space_time_l2`, and `reused`, which is true only when the driver reused a complete existing case rather than launching it again. The report also records `target_force_source` so the origin of the structural target load is explicit.
 
 The principal refinement reports are:
 
@@ -440,6 +445,15 @@ python verification/mms/analyze.py \
 **Coupled smoke test**
 
 ```sh
+python verification/mms/checks_target.py
+
+python -c 'from verification.mms.coupled_target import build_default_target, write_manifest; write_manifest(build_default_target("config", 0.03, 16), "verification/mms/results/pipeline/coupled_target.json")'
+
+verification/mms/julia_with_openssl.sh \
+    --project="${FLOWUNSTEADY_PROJECT:-../FLOWUnsteady}" \
+    verification/mms/checks_manifest_loading.jl \
+    verification/mms/results/pipeline/coupled_target.json
+
 FLOWUNSTEADY_PROJECT="${FLOWUNSTEADY_PROJECT:-../FLOWUnsteady}" \
 JULIA_BIN=verification/mms/julia_with_openssl.sh \
 python verification/mms/run_coupled_mms.py \
@@ -449,6 +463,11 @@ python verification/mms/run_coupled_mms.py \
     --n-span 16 \
     --nx 8 \
     --ny 16
+
+python verification/mms/checks_coupled_smoke.py \
+    --output verification/mms/results/G0
+
+python verification/mms/checks_transfer_mms.py
 ```
 
 **Coupled temporal and spatial refinement**
@@ -465,9 +484,10 @@ python verification/mms/run_coupled_refinement.py \
     --nx 4 \
     --ny 8 \
     --output verification/mms/results/coupled_refinement
-```
 
-After the coupled refinement finishes, generate its plots using `plot_coupled_refinement.py` as described above.
+python verification/mms/plot_coupled_refinement.py \
+    --results verification/mms/results/coupled_refinement
+```
 
 The direct commands do not automatically install dependencies or reproduce the environment setup performed by the prescribed pipeline. Python drivers should be executed in the configured FEniCS environment, and Julia verification files should be launched through `julia_with_openssl.sh` using the correct FLOWUnsteady project.
 

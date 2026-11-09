@@ -1,4 +1,4 @@
-run_name: 05-11-rbf
+run_name: 06-11-crm
 # Vahana uses 5 wake particles per shed segment and step. This improves wake
 # resolution and reduces sigma_vpm_overwrite at fixed dt and freestream speed.
 particles_per_step: 3
@@ -101,7 +101,7 @@ minimum_ncrit: 3
 viscous_scheme: none
 vpm_sfs: none
 
-save_directory: results/05-11-rbf/fluid/
+save_directory: results/06-11-crm/fluid/
 create_directory: true
 create_savepath: true
 prompt: false

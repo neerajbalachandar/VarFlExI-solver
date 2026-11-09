@@ -73,13 +73,13 @@ def _target_function(model, target, t, order, spaces):
 
 
 class ReferenceForceFunctional:
-    """Independent uniform-pressure virtual work on the plate surface.
+    """Panel-resolved target-force virtual work on the plate surface.
 
     Formulation sections: "Independent target aerodynamic load on the
     structure" and "Geometry transfer, force transfer, and virtual work".
-    The current manifest carries no sectional target-force history, so this
-    class uses a smooth uniform pressure approximation. It deliberately does
-    not call CouplingTransfer or claim independent target force-law accuracy.
+    The coupled MMS supplies panel-resolved analytical forces through
+    :meth:`set_panel_forces`. The optional smooth fallback is retained only
+    for isolated helper use and is never selected by the coupled runner.
     """
     def __init__(self, model, target):
         self.model = model
@@ -112,7 +112,10 @@ class ReferenceForceFunctional:
                     j = min(max(int(np.searchsorted(self.parent.panel_edges, x[1], side="right")-1),
                                 0), len(self.parent.panel_forces)-1)
                     dy = self.parent.panel_edges[j+1]-self.parent.panel_edges[j]
-                    density = self.parent.panel_forces[j] / max(self.parent.target.chord*dy, 1e-15)
+                    eta = (j + 0.5) / len(self.parent.panel_forces)
+                    chord = (self.parent.target.tip_chord * (1.0 - eta)
+                             + self.parent.target.chord * eta)
+                    density = self.parent.panel_forces[j] / max(chord*dy, 1e-15)
                     values[0], values[1], values[2] = density
 
                 def value_shape(self):
@@ -125,7 +128,7 @@ class ReferenceForceFunctional:
 
 
 def _newmark_target_states(model, target, t, spaces):
-    """Return exact sampled target and its discrete Newmark stage history.
+    """Return the discrete previous-state velocity and acceleration only.
 
     Formulation section: "Generalized-α stage values". Previous velocity and
     acceleration are advanced with the installed generalized-alpha
@@ -154,7 +157,8 @@ def _newmark_target_states(model, target, t, spaces):
         anew.vector().apply("insert")
         vnew.vector().apply("insert")
         qprev, vprev, aprev = qnew, vnew, anew
-    return qnew, qprev if steps == 0 else _target_function(model, target, max(0, steps-1)*dt, 0, spaces), vprev, aprev
+    # Returns the discrete previous-state velocity and acceleration only.
+    return vprev, aprev
 
 
 def add_coupled_mms_source(model, target, t, reference_force, spaces):
@@ -174,7 +178,7 @@ def add_coupled_mms_source(model, target, t, reference_force, spaces):
         v_old = _target_function(model, target, 0.0, 1, spaces)
         a_old = _target_function(model, target, 0.0, 2, spaces)
     else:
-        _, _, v_old, a_old = _newmark_target_states(model, target, float(t)-dt, spaces)
+        v_old, a_old = _newmark_target_states(model, target, float(t)-dt, spaces)
     a_new = Function(model.V)
     v_new = Function(model.V)
     a_new.vector()[:] = model.integrator.update_a(

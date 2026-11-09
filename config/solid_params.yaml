@@ -10,9 +10,9 @@ leading_edge_sweep: 0.0
 nx: 15
 ny: 80
 
-results_root: results/05-11-rbf/
+results_root: results/06-11-crm/
 output_dir: solid/
-output_run_name: 05-11-rbf
+output_run_name: 06-11-crm
 
 xdmf_filename: elastodynamics-results.xdmf
 mesh_pvd_filename: solid_mesh.pvd

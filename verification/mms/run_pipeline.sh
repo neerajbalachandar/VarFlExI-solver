@@ -16,7 +16,7 @@ run_python() {
 
 usage() {
     cat <<'EOF'
-Usage: verification/mms/run_pipeline.sh [preflight|plate|fluid|coupled|all]
+Usage: verification/mms/run_pipeline.sh [preflight|plate|fluid|coupled_quick|coupled|all]
 
 Environment:
   FENICS_ENV              Conda environment name (default: fenics-env)
@@ -35,13 +35,12 @@ EOF
 phase="${1:-all}"
 case "$phase" in
     -h|--help|help) usage; exit 0 ;;
-    preflight|plate|fluid|coupled|all) ;;
+    preflight|plate|fluid|coupled_quick|coupled|all) ;;
     *) usage >&2; exit 2 ;;
 esac
 
 run_preflight() {
-    run_python verification/mms/checks_target_roundtrip.py
-    run_python verification/mms/checks_target_derivatives.py
+    run_python verification/mms/checks_target.py
     run_python verification/mms/checks_coupled_solid.py
     run_python verification/mms/jacobian_check.py --output verification/mms/results/pipeline/plate_jacobian_check.csv
     run_python verification/mms/strong_weak_check.py --mode continuous --formulation nonlinear --resolution 12x24
@@ -70,25 +69,40 @@ run_fluid() {
     run_python verification/mms/analyze.py --study panels --results verification/mms/results/pipeline/fluid
 }
 
+run_coupled_quick() {
+    run_python verification/mms/checks_target.py
+    run_python verification/mms/run_coupled_mms.py \
+        --output verification/mms/results/pipeline/coupled_smoke \
+        --steps 3 --dt 0.01 --n-span 16 --nx 8 --ny 16
+    run_python verification/mms/checks_coupled_smoke.py \
+        --output verification/mms/results/pipeline/G0
+    run_python verification/mms/checks_transfer_mms.py
+}
+
 run_coupled() {
+    run_python verification/mms/checks_target.py
     run_python -c 'from verification.mms.coupled_target import build_default_target, write_manifest; write_manifest(build_default_target("config", 0.03, 16), "verification/mms/results/pipeline/coupled_target.json")'
     "$JULIA_BIN" --project="$FLOWUNSTEADY_PROJECT" verification/mms/checks_manifest_loading.jl \
         verification/mms/results/pipeline/coupled_target.json
     run_python verification/mms/run_coupled_mms.py \
         --output verification/mms/results/pipeline/coupled_smoke \
         --steps 3 --dt 0.01 --n-span 16 --nx 8 --ny 16
-    run_python verification/mms/checks_manifest_loading.py \
+    run_python verification/mms/checks_coupled_smoke.py \
         --output verification/mms/results/pipeline/G0
+    run_python verification/mms/checks_transfer_mms.py
     run_python verification/mms/run_coupled_refinement.py \
         --study both --levels 1,2,4 --duration 0.03 --dt 0.01 \
         --n-span 8 --nx 4 --ny 8 \
         --output verification/mms/results/pipeline/coupled_refinement
+    run_python verification/mms/plot_coupled_refinement.py \
+        --results verification/mms/results/pipeline/coupled_refinement
 }
 
 case "$phase" in
     preflight) run_preflight ;;
     plate) run_plate ;;
     fluid) run_fluid ;;
+    coupled_quick) run_coupled_quick ;;
     coupled) run_coupled ;;
     all)
         run_preflight

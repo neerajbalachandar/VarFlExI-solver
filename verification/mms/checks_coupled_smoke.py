@@ -1,14 +1,12 @@
-"""Fixed-population coupled discrete-model MMS. It exercises production
-FLOWVLM/rVPM/Reissner–Mindlin operators and the production socket chronology.
-It is not continuum Navier–Stokes MMS and does not verify native lifecycle or
-CRM/RBF moment conservation. G0 covers Objective B structural coupling and the
-fixed-population particle source; see formulation sections "The numerical
-staggered socket-coupled system" and "Required output and pass/fail semantics".
+"""Source-active production coupling smoke check.
+
+This is the renamed G0 check. It launches baseline and source-enabled coupled
+cases, then verifies that the production RK3 source hook and independently
+evolved numerical particle histories were emitted.
 """
 import argparse
 import json
 from pathlib import Path
-import tempfile
 
 from coupled_target import build_default_target, write_manifest
 from run_coupled_mms import ROOT, SMOKE_DT, run_case
@@ -29,6 +27,7 @@ def main():
         out / "target.json")
     baseline = run_case(None, out / "baseline", steps=2, n_span=n_span)
     target = run_case(target_path, out / "target", steps=2, n_span=n_span)
+
     def source_peak(path):
         stage_files = list((Path(path) / "fluid").glob("*_mms_rk3_stage_history.csv"))
         if not stage_files:
@@ -36,6 +35,7 @@ def main():
         rows = stage_files[0].read_text().splitlines()[1:]
         vals = [float(row.split(",")[3]) for row in rows if row.strip()]
         return max(vals, default=0.0)
+
     target_norm = source_peak(out / "target")
     if target_norm <= 1e-12:
         raise AssertionError(f"target source path inactive: target={target_norm}")
@@ -65,7 +65,7 @@ def main():
               "numerical_particle_evolution_observed": True,
               "baseline_vs_target_cl_differ": True}
     (out / "G0.json").write_text(json.dumps(result, indent=2) + "\n")
-    print("PASS G0 checks_manifest_loading.py", json.dumps(result))
+    print("PASS G0 checks_coupled_smoke.py", json.dumps(result))
 
 
 if __name__ == "__main__":

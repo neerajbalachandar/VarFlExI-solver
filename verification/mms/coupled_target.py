@@ -120,6 +120,12 @@ class GeometryTarget:
         return np.asarray((x + q[0], y + q[1],
                            q[2] + q[3] * (x - xb)), dtype=float)
 
+    def velocity(self, x, y, t):
+        """Exact time derivative of :meth:`point` at a fixed material point."""
+        _, q_t, _ = self.structural.q_and_derivatives(x, y, t)
+        xb = 0.25 * self.structural.Lx if self.x_bound is None else self.x_bound
+        return np.asarray((q_t[0], q_t[1], q_t[2] + q_t[3] * (x - xb)), dtype=float)
+
 
 @dataclass(frozen=True)
 class ParticleTarget:
@@ -183,15 +189,111 @@ class ParticleTarget:
 
 
 @dataclass(frozen=True)
+class BoundCirculationTarget:
+    """Analytic spanwise bound-circulation magnitude at VLM stations."""
+    gamma0: np.ndarray
+    a: np.ndarray
+    b: np.ndarray
+    omega: float
+
+    def state(self, t):
+        gamma0 = np.asarray(self.gamma0, dtype=float)
+        a = np.asarray(self.a, dtype=float)
+        b = np.asarray(self.b, dtype=float)
+        if gamma0.ndim != 1 or a.shape != gamma0.shape or b.shape != gamma0.shape:
+            raise ValueError("bound circulation gamma0, a, and b must be matching 1D arrays")
+        if not np.isfinite(gamma0).all() or not np.isfinite(a).all() or not np.isfinite(b).all():
+            raise ValueError("bound circulation coefficients must be finite")
+        if not math.isfinite(float(self.omega)) or not math.isfinite(float(t)):
+            raise ValueError("bound circulation frequency and time must be finite")
+        phase = float(self.omega) * float(t)
+        result = gamma0 + a * math.sin(phase) + b * (1.0 - math.cos(phase))
+        if not np.isfinite(result).all():
+            raise ValueError("bound circulation state is non-finite")
+        return result
+
+    def manifest(self):
+        return {"gamma0": np.asarray(self.gamma0).tolist(),
+                "a": np.asarray(self.a).tolist(), "b": np.asarray(self.b).tolist(),
+                "omega": float(self.omega)}
+
+    @classmethod
+    def from_manifest(cls, data):
+        values = {key: np.asarray(data[key], dtype=float) for key in ("gamma0", "a", "b")}
+        if any(value.ndim != 1 for value in values.values()):
+            raise ValueError("bound circulation manifest coefficients must be 1D")
+        if len({value.shape for value in values.values()}) != 1:
+            raise ValueError("bound circulation manifest coefficients must have equal lengths")
+        if not all(np.isfinite(value).all() for value in values.values()):
+            raise ValueError("bound circulation manifest coefficients must be finite")
+        omega = float(data["omega"])
+        if not math.isfinite(omega):
+            raise ValueError("bound circulation manifest frequency must be finite")
+        return cls(**values, omega=omega)
+
+
+@dataclass(frozen=True)
 class CoupledMMSTarget:
     structural: StructuralTarget
     geometry: GeometryTarget
     particles: ParticleTarget
+    bound_circulation: BoundCirculationTarget
     n_span: int
     y_stations: np.ndarray
     chord: float
+    tip_chord: float
     freestream: dict
     T: float
+
+    def panel_force(self, t):
+        """Return a span-panel Kutta–Joukowski target force in global xyz.
+
+        Circulation is oriented along +y. The panel's chordwise length is the
+        scalar spanwise-varying chord; the directed circulation line is +y, so
+        +x flow produces positive z lift. Surface velocity is subtracted from
+        local freestream at the target bound-vortex stations.
+        """
+        if (int(self.n_span) < 1 or self.y_stations.shape != (int(self.n_span),)
+                or len(self.bound_circulation.gamma0) != int(self.n_span)):
+            raise ValueError("bound-circulation station count does not match n_span")
+        eta = (np.arange(self.n_span, dtype=float) + 0.5) / self.n_span
+        gamma = self.bound_circulation.state(t)
+        rho = float(self.freestream["rho"])
+        speed = float(self.freestream["vinf"])
+        aoa = math.radians(float(self.freestream.get("aoa_deg", 0.0)))
+        gradient = np.asarray(self.freestream.get("gradient", np.zeros(9)), dtype=float).reshape(3, 3).T
+        amplitudes = np.asarray(self.freestream.get("oscillation", np.zeros(3)), dtype=float)
+        wave = np.asarray(self.freestream.get("wavenumber", np.zeros(3)), dtype=float)
+        reference = np.asarray(self.freestream.get("reference", np.zeros(3)), dtype=float)
+        frequency = float(self.freestream.get("frequency_hz", 0.0))
+        phase0 = math.radians(float(self.freestream.get("phase_deg", 0.0)))
+        if amplitudes.shape != (3,) or wave.shape != (3,) or reference.shape != (3,):
+            raise ValueError("freestream oscillation, wavenumber, and reference must be 3-vectors")
+        if not all(np.isfinite(x).all() if isinstance(x, np.ndarray) else math.isfinite(float(x))
+                   for x in (gradient, amplitudes, wave, reference, rho, speed, frequency, phase0)):
+            raise ValueError("target freestream contains non-finite values")
+
+        force = np.zeros((self.n_span, 3), dtype=float)
+        dt = float(t)
+        xb = float(self.geometry.x_bound if self.geometry.x_bound is not None else 0.25*self.structural.Lx)
+        for i, eta_i in enumerate(eta):
+            y = float(self.y_stations[i])
+            x = xb
+            surface_velocity = self.geometry.velocity(x, y, dt)
+            point = self.geometry.point(x, y, dt)
+            xp = point - reference
+            base = speed * np.asarray((math.cos(aoa), 0.0, math.sin(aoa)))
+            gust_phase = 2.0 * math.pi * frequency * dt + phase0
+            gust = amplitudes * np.sin(gust_phase + np.asarray((wave[1]*xp[1], wave[2]*xp[2], wave[0]*xp[0])))
+            local_velocity = base + gradient @ xp + gust - surface_velocity
+            chord_i = self.tip_chord * (1.0 - eta_i) + self.chord * eta_i
+            # The structural/fluid interface uses y as the span direction.
+            # Thus the directed circulation line is +y and +x flow gives +z lift.
+            circulation_line = np.asarray((0.0, chord_i, 0.0))
+            force[i] = rho * gamma[i] * np.cross(local_velocity, circulation_line)
+        if force.shape != (self.n_span, 3) or not np.isfinite(force).all():
+            raise ValueError("target panel force is non-finite or has an invalid shape")
+        return force
 
     def manifest(self):
         """Serialize all analytic data consumed by both solver processes."""
@@ -202,7 +304,8 @@ class CoupledMMSTarget:
             "scope": SCOPE,
             "Lx": float(self.structural.Lx), "Ly": float(self.structural.Ly),
             "n_span": int(self.n_span), "y_stations": self.y_stations.tolist(),
-            "chord": float(self.chord), "sweep": float(self.geometry.sweep),
+            "chord": float(self.chord), "tip_chord": float(self.tip_chord),
+            "sweep": float(self.geometry.sweep),
             "x_bound": float(self.geometry.x_bound if self.geometry.x_bound is not None else 0.25*self.structural.Lx),
             "freestream": self.freestream, "T": float(self.T),
             "structural": {
@@ -212,6 +315,7 @@ class CoupledMMSTarget:
                 },
             },
             "particles": self.particles.manifest(),
+            "bound_circulation": self.bound_circulation.manifest(),
             "particle_formula": {
                 "position": "x0 + a*sin(omega_x*t) + b*(1-cos(omega_x*t))",
                 "circulation": "gamma0 + c*sin(omega_gamma*t) + d*(1-cos(omega_gamma*t))",
@@ -223,9 +327,17 @@ class CoupledMMSTarget:
     def from_manifest(cls, data):
         structural = StructuralTarget(float(data["Lx"]), float(data["Ly"]), data["structural"]["components"])
         geometry = GeometryTarget(structural, float(data["sweep"]), float(data["x_bound"]))
+        n_span = int(data["n_span"])
+        y_stations = np.asarray(data["y_stations"], dtype=float)
+        if n_span < 1 or y_stations.shape != (n_span,) or not np.isfinite(y_stations).all():
+            raise ValueError("manifest y_stations must be a finite vector with n_span entries")
+        bound_circulation = BoundCirculationTarget.from_manifest(data["bound_circulation"])
+        if bound_circulation.gamma0.shape != (n_span,):
+            raise ValueError("bound-circulation manifest length must equal n_span")
         return cls(structural, geometry, ParticleTarget.from_manifest(data["particles"]),
-                   int(data["n_span"]), np.asarray(data["y_stations"], dtype=float),
-                   float(data["chord"]), data["freestream"], float(data["T"]))
+                   bound_circulation, n_span, y_stations,
+                   float(data["chord"]), float(data.get("tip_chord", data["chord"])),
+                   data["freestream"], float(data["T"]))
 
 
 def _read_yaml(path):
@@ -275,10 +387,19 @@ def build_default_target(config, T, n_span_override=None):
         "nu": float(fluid.get("nu", 1.5e-5)),
         "oscillation": fluid.get("freestream_oscillation", [0.0, 0.0, 0.0]),
         "frequency_hz": float(fluid.get("freestream_frequency_hz", 0.0)),
+        "gradient": fluid.get("freestream_gradient", [0.0] * 9),
+        "wavenumber": fluid.get("freestream_wavenumber", [0.0] * 3),
+        "phase_deg": float(fluid.get("freestream_phase_deg", 0.0)),
+        "reference": fluid.get("freestream_reference", [0.0] * 3),
     }
+    bound_circulation = BoundCirculationTarget(
+        gamma0=np.full(n_span, 1.0e-4), a=np.full(n_span, 1.0e-5),
+        b=np.full(n_span, 5.0e-6), omega=omega,
+    )
     return CoupledMMSTarget(
         structural, GeometryTarget(structural, float(solid.get("leading_edge_sweep", 0.0))),
-        particle, n_span, y_stations, Lx, freestream, float(T)
+        particle, bound_circulation, n_span, y_stations, Lx,
+        float(solid.get("tip_chord", Lx)), freestream, float(T)
     )
 
 

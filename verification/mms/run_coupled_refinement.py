@@ -3,6 +3,12 @@
 Each case is compared to its own analytic target histories. The finest
 computed solution is never used as a reference. This driver launches the
 production socket-coupled solvers only when explicitly run by the user.
+
+Scope: fixed particle population; bound circulation is checked against the
+target VLM residual, not forced; the CRM transfer operator is machine-precision
+on the target; the coupled error therefore includes the VLM solution error
+and the RBF interpolation floor where RBF is used. The coupled error is not a
+continuum Navier-Stokes error.
 """
 import argparse
 import csv
@@ -130,6 +136,7 @@ def main():
             case = output / f"{study}_level_{level}"
             manifest = write_manifest(build_default_target(config, args.duration, nspan), case / "target.json")
             cached = load_completed_case(case, steps)
+            reused = cached is not None
             if cached is None:
                 fluid = run_case(manifest, case, steps, config_dir=config, dt=dt,
                                  n_span=nspan, nx=nx, ny=ny)
@@ -156,7 +163,11 @@ def main():
                 measures[key] = relative_space_time_l2(fluid, nkey, tkey)
             report.append({"study":study,"level":level,"dt_s":dt,"steps":steps,
                            "n_span":nspan,"solid_nx":nx,"solid_ny":ny,
-                           "physical_final_time_s":steps*dt,**measures,"case_dir":str(case)})
+                           "physical_final_time_s":steps*dt,
+                           "reused":reused,
+                           "structural_error_with_target_force":measures["structural_state_relative_space_time_l2"],
+                           "target_force_source":"analytic panel force from BoundCirculationTarget",
+                           **measures,"case_dir":str(case)})
         series = [row for row in report if row["study"] == study]
         series.sort(key=lambda row: row["level"])
         metric_names = [key for key in series[0] if key.endswith("relative_space_time_l2")]
