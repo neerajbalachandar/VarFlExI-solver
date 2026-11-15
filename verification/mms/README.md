@@ -89,7 +89,7 @@ The files in this directory are grouped below according to the part of the verif
 | `checks_target.py` | Merged target serialization and derivative check. It verifies that the shared analytical target round-trips through JSON and that its analytical derivatives agree with finite differences. |
 | `checks_coupled_smoke.py` | Renamed G0 source-active production coupling smoke check. It runs baseline and target coupled simulations, verifies the active source at every RK3 stage, and checks that the numerical particle state evolves independently. It launches the solvers. |
 | `checks_manifest_loading.jl` | Loads the target manifest and checks the relevant production Julia source hooks. This is a source and manifest preflight; it does not execute a simulation. |
-| `checks_coupled_solid.py` | Checks that the analytical target satisfies the production structural residual under the target force transferred from the analytical panel force. |
+| `checks_coupled_solid.py` | Checks the source identity: the production structural residual at the analytical target is cancelled by the manufactured source and transferred target force. It checks source sign and generalized-α staging; it is not an independent PDE test. |
 | `checks_transfer_mms.py` | Checks CRM and RBF geometry/load transfer metrics and virtual-work consistency for the coupled analytical target. |
 
 ### Standalone structural MMS
@@ -310,7 +310,7 @@ The smoke directory contains the short coupled simulation histories, process log
 
 Each case in `coupled_refinement_report.json` and `.csv` includes `structural_error_with_target_force`, which is the same analytical-target structural space-time L2 error reported as `structural_state_relative_space_time_l2`, and `reused`, which is true only when the driver reused a complete existing case rather than launching it again. The report also records `target_force_source` so the origin of the structural target load is explicit.
 
-The principal refinement reports are:
+The principal refinement reports and figures are:
 
 ```text
 coupled_refinement/coupled_refinement_report.csv
@@ -395,9 +395,11 @@ This produces:
 coupled_refinement_error_metrics.png
 coupled_refinement_target_histories.png
 coupled_refinement_observed_orders.csv
+coupled_refinement_error_vs_time.png
+coupled_refinement_bound_circulation_residual.png
 ```
 
-The first plot shows the analytical-target error across temporal and spatial refinement levels. The second compares selected numerical histories with their analytical targets. The CSV contains the pairwise observed orders and indicates whether the errors decrease monotonically.
+The error metrics figure compares structural, particle, and probe analytical-target errors across temporal and spatial levels, with second- and third-order reference slopes. The history figure overlays each refinement level with the target for lift and probe velocity, and compares final spanwise circulation for the finest level. The observed-orders CSV contains pairwise measured orders and the report's per-metric rate assessment. Supplementary figures show pointwise structural and particle-position errors over time and the target FLOWVLM circulation residual by refinement level.
 
 The plotting script currently expects the default refinement levels `1,2,4`, including the `time_level_4` and `spatial_level_4` case directories. When using a different level sequence, the case selections in the plotting script should be adjusted accordingly.
 

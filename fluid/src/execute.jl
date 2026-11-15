@@ -94,8 +94,11 @@ open(station_path, "w") do io
     for rec in force_payload_history
         forces = rec["force"]
         points = rec["geometry_cp_absolute"]
-        leading_edges = rec["geometry_le_absolute"]
-        trailing_edges = rec["geometry_te_absolute"]
+        # Coupled payloads now carry all three geometry station sets.  The
+        # fallback keeps post-processing compatible with histories produced
+        # before edge geometry was recorded.
+        leading_edges = get(rec, "geometry_le_absolute", points)
+        trailing_edges = get(rec, "geometry_te_absolute", points)
         gamma = rec["bound_circulation"]
         my = rec["station_moment_y_Nm"]
         cls, cds, cms = rec["station_cl"], rec["station_cd"], rec["station_cm"]

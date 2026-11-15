@@ -182,9 +182,28 @@ def main():
                     orders[metric] = (math.log(e0/e1) / math.log(h_prev/h_now)
                                       if e0 > 0 and e1 > 0 and h_prev > h_now else None)
             row["observed_order_from_previous_level"] = orders
+    rate_assessment = {}
+    for study in studies:
+        series = sorted((row for row in report if row["study"] == study),
+                        key=lambda row: int(row["level"]))
+        assessments = {}
+        for metric in [key for key in (series[0] if series else {})
+                        if key.endswith("relative_space_time_l2")]:
+            errors = [float(row[metric]) for row in series]
+            if len(errors) < 3:
+                assessments[metric] = "INCONCLUSIVE: fewer than three refinement levels"
+            elif not all(math.isfinite(error) for error in errors):
+                assessments[metric] = "INCONCLUSIVE: non-finite error value"
+            elif not all(coarse > fine > 0.0 for coarse, fine in zip(errors[:-1], errors[1:])):
+                assessments[metric] = "INCONCLUSIVE: errors do not decrease monotonically"
+            else:
+                assessments[metric] = "MEASURED"
+        rate_assessment[study] = assessments
     json_path = output / "coupled_refinement_report.json"
     csv_path = output / "coupled_refinement_report.csv"
-    json_path.write_text(json.dumps({"scope":"analytic-target coupled discrete-model MMS; no finest-run reference", "cases":report},indent=2)+"\n")
+    json_path.write_text(json.dumps({"scope":"analytic-target coupled discrete-model MMS; no finest-run reference",
+                                     "rate_assessment":rate_assessment,
+                                     "cases":report},indent=2)+"\n")
     with csv_path.open("w",newline="",encoding="utf-8") as stream:
         writer=csv.DictWriter(stream,fieldnames=list(report[0]))
         writer.writeheader(); writer.writerows(report)

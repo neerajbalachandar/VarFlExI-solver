@@ -1,6 +1,8 @@
-"""Checks that the analytic target satisfies the production structural
-residual under the target force transferred from the analytic panel force.
-This replaces the earlier tautological residual-identity check.
+"""Checks that the production structural residual at the analytic target is
+exactly cancelled by the manufactured source together with the target
+transferred force. Verifies the sign and alpha-stage structure of
+add_coupled_mms_source. Not an independent test against the PDE; that is
+covered by run_coupled_refinement.py.
 """
 import sys
 from pathlib import Path
@@ -14,7 +16,11 @@ sys.path.insert(0, str(ROOT / "solid"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils import ReissnerMindlinModel, SolidDomain
 from coupled_target import build_default_target
-from coupled_solid_source import ReferenceForceFunctional, _target_function
+from coupled_solid_source import (
+    ReferenceForceFunctional,
+    _target_function,
+    add_coupled_mms_source,
+)
 
 
 def main():
@@ -39,15 +45,19 @@ def main():
 
     force = ReferenceForceFunctional(model, target)
     force.set_panel_forces(target.panel_force(dt))
+    source = add_coupled_mms_source(model, target, dt, force, spaces)
     rhs = assemble(model.residual)
     rhs *= -1.0
     rhs.axpy(1.0, force.vector(dt))
+    rhs.axpy(1.0, source)
     for bc in model.bcs:
         bc.apply(rhs)
-    norm = rhs.norm("l2")
-    reference = force.vector(dt).norm("l2")
-    if not np.isfinite(norm) or norm > 1.0e-10 * max(reference, 1.0):
-        raise AssertionError(f"analytic target residual under target panel force is {norm:.6e}; reference={reference:.6e}")
+    defect = rhs.norm("l2")
+    source_norm = source.norm("l2")
+    if not np.isfinite(source_norm) or source_norm <= 1e-12:
+        raise AssertionError(f"structural manufactured source is inactive: {source_norm}")
+    if defect > 1e-8 * max(source_norm, 1.0):
+        raise AssertionError(f"source identity failed: defect={defect}, source_norm={source_norm}")
     print("PASS checks_coupled_solid")
 
 
