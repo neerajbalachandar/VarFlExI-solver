@@ -140,9 +140,7 @@ function seed_coupled_mms_particles!(target::CoupledMMSTarget, pfield)
 end
 
 function independent_rvpm_kernel_g(rho::Float64)::Float64
-    sqrt2pi = sqrt(2.0 * π)
-    r = rho / sqrt2pi
-    return erf(r) - r * exp(-rho^2 / (2.0 * π^2))
+    return ccall(:erf, Cdouble, (Cdouble,), rho / sqrt(2.0)) - sqrt(2.0 / π) * rho * exp(-0.5 * rho^2)
 end
 
 function independent_biot_savart_velocity(x_target, X, Gamma, sigma)
@@ -197,8 +195,12 @@ function independent_rhs_at_target(target::CoupledMMSTarget, X, Gamma, sigma, Ui
             Z = (f_rvpm + g_rvpm) / (1.0 + 3.0 * f_rvpm) * dot(S, gi) / G2
         end
         rhsG[i, :] .= S .- 3.0 .* Z .* gi
+        # Stretching-induced core evolution rate in rVPM: dsigma/dt = -sigma * Z
+        # Retained to ensure the native stretching-induced core evolution is
+        # actively verified rather than bypassed by an ad-hoc source injection.
+        rhsS[i] = -sigma[i] * Z
     end
-    return rhsX, rhsG, zeros(n)
+    return rhsX, rhsG, rhsS
 end
 
 function native_rhs_at_target(target::CoupledMMSTarget, X, Gamma, sigma, pfield, t)

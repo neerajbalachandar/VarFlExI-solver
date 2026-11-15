@@ -684,16 +684,16 @@ def rvpm_kernel_g(r_sigma: float) -> float:
     """Regularization function g(r/σ) for the Gaussian-erf kernel.
 
     For the FLOWVPM gaussianerf kernel:
-      g(ρ) = erf(ρ/√(2π)) − ρ/√(2π) · exp(−ρ²/(2π²))
-    This is the production kernel; the constant is reproduced here
-    independently for source evaluation.
+      g(ρ) = erf(ρ/√2) − √(2/π) · ρ · exp(−ρ²/2)
+    This matches FLOWVPM.g_gauserf exactly.
 
     Returns g(r/σ) used in the Biot-Savart-like velocity reconstruction:
       u_p(x) = Σ_q (1/4π) g(|x−x_q|/σ_q) / |x−x_q|³ × (Γ_q × (x−x_q))
     """
     rho = float(r_sigma)
-    sqrt2pi = math.sqrt(2.0 * math.pi)
-    return math.erf(rho / sqrt2pi) - (rho / sqrt2pi) * math.exp(-rho ** 2 / (2.0 * math.pi ** 2))
+    sqrt2 = math.sqrt(2.0)
+    sqrt2_pi = math.sqrt(2.0 / math.pi)
+    return math.erf(rho / sqrt2) - sqrt2_pi * rho * math.exp(-0.5 * rho ** 2)
 
 
 def biot_savart_induced_velocity(x_target: np.ndarray,
@@ -732,10 +732,12 @@ def independent_rvpm_stretching_rhs(X: np.ndarray,
                                      Gamma: np.ndarray,
                                      sigma: np.ndarray,
                                      f_rvpm: float = 1.0 / 2.0,
-                                     g_rvpm: float = 5.0 / 4.0) -> np.ndarray:
+                                     g_rvpm: float = 5.0 / 4.0,
+                                     return_core_rate: bool = False):
     """Independent implementation of the rVPM vortex stretching RHS.
 
     Computes dΓ_p/dt = S_p − 3 Z_p Γ_p  (reformulated VPM formulation)
+    and stretching-induced core evolution rate dσ_p/dt = −σ_p Z_p
     where:
       S_p = (∇u)^T Γ_p  (transposed stretching, production default)
             or (∇u) Γ_p  (classic stretching)
@@ -748,19 +750,16 @@ def independent_rvpm_stretching_rhs(X: np.ndarray,
     ----------
     X, Gamma, sigma : particle state at the current stage time.
     f_rvpm, g_rvpm  : rVPM formulation constants (default: transposed rVPM).
+    return_core_rate: if True, returns tuple (dGamma_dt, dsigma_dt).
 
     Returns
     -------
     dGamma_dt : (N, 3) independent stretching RHS.
-
-    Notes
-    -----
-    The velocity Jacobian J = ∂u_i/∂x_j is computed by finite difference
-    of the Biot-Savart field, NOT from FLOWVPM's internal J storage, to
-    ensure independence.
+    (optional) dsigma_dt : (N,) stretching-induced core evolution RHS.
     """
     N = len(sigma)
     dGamma_dt = np.zeros((N, 3))
+    dsigma_dt = np.zeros(N)
     h_fd = 1.0e-5  # finite-difference step for Jacobian
     # Compute u at all particle positions
     U = np.array([biot_savart_induced_velocity(X[p], X, Gamma, sigma) for p in range(N)])
@@ -781,6 +780,10 @@ def independent_rvpm_stretching_rhs(X: np.ndarray,
             Z = (f_rvpm + g_rvpm) / (1.0 + 3.0 * f_rvpm) * np.dot(S, Gamma[p]) / G2
         # rVPM: dΓ/dt = S − 3 Z Γ  (no SFS term for inviscid reference config)
         dGamma_dt[p] = S - 3.0 * Z * Gamma[p]
+        # rVPM core-evolution: dσ/dt = −σ Z
+        dsigma_dt[p] = -sigma[p] * Z
+    if return_core_rate:
+        return dGamma_dt, dsigma_dt
     return dGamma_dt
 
 
@@ -837,11 +840,22 @@ class ErrorNorms:
 
     @staticmethod
     def observed_order(coarse_error: float, fine_error: float,
-                       refinement_ratio: float) -> float:
+                       refinement_ratio_or_h1: float, h2: Optional[float] = None) -> float:
         """Pairwise convergence order estimate.
 
-        Returns NaN if inputs are non-positive, non-finite, or ratio ≤ 1.
+        Supports either:
+          observed_order(e_coarse, e_fine, ratio)
+          observed_order(e_coarse, e_fine, h_coarse, h_fine)
+
+        Returns NaN if inputs are non-positive, non-finite, or ratio <= 1.
         """
+        if h2 is not None:
+            if h2 <= 0.0 or refinement_ratio_or_h1 <= 0.0:
+                return float("nan")
+            refinement_ratio = float(refinement_ratio_or_h1) / float(h2)
+        else:
+            refinement_ratio = float(refinement_ratio_or_h1)
+
         if (not math.isfinite(coarse_error) or not math.isfinite(fine_error)
                 or coarse_error <= 0.0 or fine_error <= 0.0
                 or refinement_ratio <= 1.0 or fine_error >= coarse_error):
@@ -1257,6 +1271,7 @@ def add_coupled_mms_source(model, target: CoupledMMSTarget, t: float,
             + model._mms_fw * test_w
             + inner(model._mms_fth, test_theta)
         ) * source_measure
+        model._mms_force_expressions = True
 
     # Update continuous evaluation time
     model._mms_fu.t = float(t)

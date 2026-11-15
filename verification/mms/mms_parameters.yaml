@@ -118,18 +118,15 @@ interface_traction:
 standalone_plate:
   element_degree: 2    # CG polynomial degree (must match production solver)
   spatial_cases:
-    - {nx:  6,  ny:   8, dt: 6.25e-5, duration: 0.01}
-    - {nx: 12,  ny:  16, dt: 6.25e-5, duration: 0.01}
-    - {nx: 24,  ny:  32, dt: 6.25e-5, duration: 0.01}
-    - {nx: 48,  ny:  64, dt: 6.25e-5, duration: 0.01}
-    - {nx: 96,  ny: 128, dt: 6.25e-5, duration: 0.01}
+    - {nx:  6,  ny:   8, dt: 1.000e-3, duration: 0.005}
+    - {nx: 12,  ny:  16, dt: 1.000e-3, duration: 0.005}
+    - {nx: 24,  ny:  32, dt: 1.000e-3, duration: 0.005}
+    - {nx: 48,  ny:  64, dt: 1.000e-3, duration: 0.005}
   temporal_cases:
-    - {nx: 48, ny: 128, dt: 5.000e-3, duration: 0.05}
-    - {nx: 48, ny: 128, dt: 2.500e-3, duration: 0.05}
-    - {nx: 48, ny: 128, dt: 1.250e-3, duration: 0.05}
-    - {nx: 48, ny: 128, dt: 6.250e-4, duration: 0.05}
-    - {nx: 48, ny: 128, dt: 3.125e-4, duration: 0.05}
-    - {nx: 48, ny: 128, dt: 1.5625e-4, duration: 0.05}
+    - {nx: 24, ny: 32, dt: 4.000e-3, duration: 0.02}
+    - {nx: 24, ny: 32, dt: 2.000e-3, duration: 0.02}
+    - {nx: 24, ny: 32, dt: 1.000e-3, duration: 0.02}
+    - {nx: 24, ny: 32, dt: 5.000e-4, duration: 0.02}
 
 # ---------------------------------------------------------------------------
 # REFINEMENT STUDY — COUPLED FSI

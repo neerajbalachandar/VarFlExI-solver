@@ -44,10 +44,27 @@ Studies:
 """
 
 using LinearAlgebra
-using SpecialFunctions   # for erf()
 using Statistics         # for mean()
-using JSON               # JSON3 or JSON — loaded below
+using JSON               # JSON loader
 using Printf
+
+# Independent libm erf wrapper (zero external dependencies)
+@inline _erf(x::Float64)::Float64 = ccall(:erf, Cdouble, (Cdouble,), x)
+
+const _HAS_FLOWVPM = try
+    @eval using FLOWVPM
+    true
+catch
+    false
+end
+const vpm = _HAS_FLOWVPM ? FLOWVPM : nothing
+
+if _HAS_FLOWVPM
+    _rk3_path = joinpath(@__DIR__, "../../fluid/src/mms_rk3.jl")
+    if isfile(_rk3_path)
+        include(_rk3_path)
+    end
+end
 
 # ---------------------------------------------------------------------------
 # 0. JSON LOADING HELPER
@@ -97,11 +114,25 @@ struct ParticleTarget
 end
 
 """Load particle target from manifest dict (read from JSON)."""
-function load_particle_target(manifest::Dict)::ParticleTarget
+function load_particle_target(manifest::AbstractDict)::ParticleTarget
     p = manifest["particles"]
     # JSON arrays are row-major; reshape to (3, N)
     n = length(p["ids"])
-    to_mat(key) = reshape(Float64.(p[key]), 3, n)
+    function to_mat(key)
+        raw = p[key]
+        if isempty(raw)
+            return zeros(Float64, 3, 0)
+        end
+        if raw[1] isa AbstractVector
+            M = Matrix{Float64}(undef, 3, length(raw))
+            for i in eachindex(raw)
+                M[:, i] .= Float64.(raw[i])
+            end
+            return M
+        else
+            return reshape(Float64.(raw), 3, n)
+        end
+    end
     to_vec(key) = Float64.(p[key])
     return ParticleTarget(
         n,
@@ -151,16 +182,14 @@ end
 # u(x) = (1/4π) Σ_p  g(r_p/σ_p) / r_p³  ×  (Γ_p × (x − x_p))
 #
 # Gaussian-erf kernel (reproduced from FLOWVPM; independent implementation):
-#   g(ρ) = erf(ρ/√(2π)) − (ρ/√(2π)) exp(−ρ²/(2π²))
+#   g(ρ) = erf(ρ/√2) − √(2/π) ρ exp(−ρ²/2)
 #
 # This function is computed WITHOUT calling any FLOWVPM UJ operator.
 # ---------------------------------------------------------------------------
 
 """Gaussian-erf regularization kernel g(r/σ)."""
 function rvpm_kernel_g(rho::Float64)::Float64
-    sqrt2pi = sqrt(2.0 * π)
-    r = rho / sqrt2pi
-    return erf(r) - r * exp(-rho^2 / (2.0 * π^2))
+    return _erf(rho / sqrt(2.0)) - sqrt(2.0 / π) * rho * exp(-0.5 * rho^2)
 end
 
 """
@@ -219,14 +248,16 @@ Arguments
 Returns
 -------
   dGamma_dt : (3, N) independent stretching RHS
+  dsigma_dt : (N,)   independent stretching-induced core evolution RHS: dσ/dt = -σ Z
 """
 function independent_stretching_rhs(X::Matrix{Float64},
                                      Gamma::Matrix{Float64},
                                      sigma::Vector{Float64};
                                      f_rvpm::Float64 = 0.5,
-                                     g_rvpm::Float64 = 1.25)::Matrix{Float64}
+                                     g_rvpm::Float64 = 1.25)
     n = size(X, 2)
     dGamma_dt = zeros(Float64, 3, n)
+    dsigma_dt = zeros(Float64, n)
     h_fd = 1.0e-5   # finite-difference step for velocity Jacobian
 
     # Compute velocity at all particle positions (independent Biot-Savart)
@@ -254,8 +285,10 @@ function independent_stretching_rhs(X::Matrix{Float64},
         end
         # rVPM: dΓ/dt = S − 3 Z Γ  (no SFS term for inviscid reference)
         dGamma_dt[:, p] = S .- 3.0 .* Z .* Gamma[:, p]
+        # rVPM: stretching-induced core evolution rate dσ/dt = -σ Z
+        dsigma_dt[p] = -sigma[p] * Z
     end
-    return dGamma_dt
+    return dGamma_dt, dsigma_dt
 end
 
 # ---------------------------------------------------------------------------
@@ -263,10 +296,12 @@ end
 #
 #   b_x,p  = Ẋ_p* − (U_BiS(X_p*, Γ_all, σ_all) + U_inf)
 #   b_Γ,p  = Γ̇_p* − dΓ_dt^independent(X_p*, Γ_p*, σ_p*)
-#   b_σ,p  = σ̇_p* − 0.0    (inviscid; no core spreading in remapping scheme)
+#   b_σ,p  = σ̇_p* − dσ_dt^independent(X_p*, Γ_p*, σ_p*)
+#          = σ̇_p* − (−σ_p* Z_p*) = σ̇_p* + σ_p* Z_p*
 #
-# INDEPENDENCE NOTE: b_Γ uses independent_stretching_rhs, NOT
+# INDEPENDENCE NOTE: b_Γ and b_σ use independent_stretching_rhs, NOT
 # vpm.update_particle_states applied to a shadow copy.
+# Core evolution actively exercises the native stretching-induced core update.
 # ---------------------------------------------------------------------------
 
 """
@@ -278,7 +313,7 @@ for all particles in the target.
 Returns named tuple (bx, bGamma, bsigma):
   bx     : (3, N) position source  [m/s]
   bGamma : (3, N) circulation source  [m³/s²]
-  bsigma : (N,)   core source  [m/s]  (all zeros for inviscid case)
+  bsigma : (N,)   core source  [m/s]  (exercising dσ/dt = -σ Z)
 """
 function compute_particle_source(tgt::ParticleTarget, t::Float64,
                                   U_inf::Vector{Float64};
@@ -296,14 +331,14 @@ function compute_particle_source(tgt::ParticleTarget, t::Float64,
         G_x[:, p] .+= U_inf
     end
 
-    # Independent circulation RHS: G_Γ = stretching
-    G_Gamma = independent_stretching_rhs(X_star, Gamma_star, sigma_star;
-                                          f_rvpm=f_rvpm, g_rvpm=g_rvpm)
+    # Independent circulation and core RHS from rVPM stretching
+    G_Gamma, G_sigma = independent_stretching_rhs(X_star, Gamma_star, sigma_star;
+                                                  f_rvpm=f_rvpm, g_rvpm=g_rvpm)
 
     # Sources: b = Ẏ* − G^independent(Y*)
     bx      = Xdot_star     .- G_x
     bGamma  = Gdot_star     .- G_Gamma
-    bsigma  = sdot_star     .- 0.0   # inviscid: no core source
+    bsigma  = sdot_star     .- G_sigma   # tests stretching-induced core evolution
 
     return (bx=bx, bGamma=bGamma, bsigma=bsigma)
 end
@@ -401,7 +436,7 @@ end
 #   (c) FD consistency of Ẋ* ≈ G_x^independent + b_x  (tautological, by construction)
 # ---------------------------------------------------------------------------
 
-function run_standalone_verification(tgt::ParticleTarget, manifest::Dict,
+function run_standalone_verification(tgt::ParticleTarget, manifest::AbstractDict,
                                       output_dir::AbstractString)
     println("=" ^ 70)
     println("PARTICLE-LEVEL MMS  — Standalone Source Verification")
@@ -469,7 +504,7 @@ end
 # This function only computes standalone source properties.
 # ---------------------------------------------------------------------------
 
-function run_refinement_study(manifest::Dict, output_dir::AbstractString)
+function run_refinement_study(manifest::AbstractDict, output_dir::AbstractString)
     println("=" ^ 70)
     println("PARTICLE-LEVEL MMS  — Refinement Study (source properties)")
     println("=" ^ 70)
@@ -560,13 +595,151 @@ function build_scaled_target(n::Int, Lx::Float64, Ly::Float64,
 end
 
 # ---------------------------------------------------------------------------
+# 7b. REAL PARTICLE TIME REFINEMENT (FLOWVPM native RK3 integrator)
+# ---------------------------------------------------------------------------
+
+"""
+    run_particle_time_refinement(tgt, manifest, output_dir)
+
+Execute real time-step refinement on the particle ODE using FLOWVPM's native
+Runge-Kutta 3 integrator and the stage-aware MMS source adapter MMSRK3StateSource.
+
+Verifies:
+  - Position evolution:     dX_p/dt = U_BiS(X_p) + U_inf + b_x,p*
+  - Circulation evolution:  dΓ_p/dt = S_p - 3 Z_p Γ_p + b_Γ,p*
+  - Core-radius evolution:  dσ_p/dt = -σ_p Z_p + b_σ,p*
+
+All three equations are integrated simultaneously. At final time T_end,
+computes numerical-vs-target L² errors and observed convergence orders.
+"""
+function run_particle_time_refinement(tgt::ParticleTarget, manifest::AbstractDict, output_dir::AbstractString)
+    println("=" ^ 70)
+    println("PARTICLE-LEVEL MMS — FLOWVPM RK3 Temporal Convergence Study")
+    println("Verifying native RK3 integrator with MMSRK3StateSource")
+    println("=" ^ 70)
+
+    if !_HAS_FLOWVPM
+        @warn "FLOWVPM is not installed in current Julia path; skipping ODE integration."
+        return nothing
+    end
+    vpm = FLOWVPM
+
+    vinf_data = get(manifest, "freestream", Dict())
+    vinf_val  = Float64(get(vinf_data, "vinf", 15.0))
+    aoa_deg   = Float64(get(vinf_data, "aoa_deg", 0.0))
+    U_inf     = [vinf_val * cosd(aoa_deg), 0.0, vinf_val * sind(aoa_deg)]
+
+    T_end = 0.04  # s
+    dt_list = [0.02, 0.01, 0.005, 0.0025]
+
+    errors_x = Float64[]
+    errors_g = Float64[]
+    errors_s = Float64[]
+    results = []
+
+    for dt in dt_list
+        n_steps = round(Int, T_end / dt)
+        pfield = vpm.ParticleField(tgt.n; Uinf=(t)->U_inf)
+        pfield.formulation = vpm.rVPM
+
+        # Seed target initial condition at t = 0
+        X0, G0, S0 = particle_target_state(tgt, 0.0)
+        for i in 1:tgt.n
+            vpm.add_particle(pfield, view(X0, :, i), view(G0, :, i), S0[i]; static=false)
+        end
+
+        cache = Dict{Float64, Any}()
+        function source_callback(particle, stage_time, particle_slot, pf, a, b, step_dt)
+            t_s = Float64(stage_time)
+            if !haskey(cache, t_s)
+                cache[t_s] = compute_particle_source(tgt, t_s, U_inf)
+            end
+            src = cache[t_s]
+            p = Int(particle_slot)
+            return (position=src.bx[:, p], circulation=src.bGamma[:, p], core=src.bsigma[p])
+        end
+
+        adapter = MMSRK3StateSource(source_callback, nothing)
+
+        t_curr = 0.0
+        for step in 1:n_steps
+            pfield.t = t_curr
+            adapter(pfield, dt)
+            t_curr += dt
+            pfield.t = t_curr
+        end
+
+        X_num = zeros(Float64, 3, tgt.n)
+        Gamma_num = zeros(Float64, 3, tgt.n)
+        sigma_num = zeros(Float64, tgt.n)
+        for i in 1:tgt.n
+            pt = vpm.get_particle(pfield, i)
+            X_num[:, i] .= vpm.get_X(pt)
+            Gamma_num[:, i] .= vpm.get_Gamma(pt)
+            sigma_num[i] = vpm.get_sigma(pt)[]
+        end
+
+        errs = particle_l2_errors(X_num, Gamma_num, sigma_num, tgt, T_end)
+        push!(errors_x, errs.e_pos)
+        push!(errors_g, errs.e_circ)
+        push!(errors_s, errs.e_sigma)
+        @printf("  dt = %.4e s (%3d steps)  e_pos = %.4e  e_circ = %.4e  e_sigma = %.4e\n",
+                dt, n_steps, errs.e_pos, errs.e_circ, errs.e_sigma)
+        push!(results, Dict(
+            "dt" => dt, "n_steps" => n_steps,
+            "e_pos" => errs.e_pos, "e_circ" => errs.e_circ, "e_sigma" => errs.e_sigma
+        ))
+    end
+
+    function calc_orders(errs, dts)
+        ords = fill(NaN, length(errs))
+        for i in 2:length(errs)
+            if errs[i] > 0 && errs[i-1] > 0
+                ords[i] = log(errs[i-1] / errs[i]) / log(dts[i-1] / dts[i])
+            end
+        end
+        return ords
+    end
+
+    ord_x = calc_orders(errors_x, dt_list)
+    ord_g = calc_orders(errors_g, dt_list)
+    ord_s = calc_orders(errors_s, dt_list)
+
+    println("\n" * "=" ^ 75)
+    println("Particle RK3 Temporal Convergence Summary")
+    println("=" ^ 75)
+    @printf("%-12s %-12s %-12s %-12s %-8s %-8s %-8s\n",
+            "dt (s)", "e_pos", "e_circ", "e_sigma", "ord_pos", "ord_circ", "ord_sigma")
+    println("-" ^ 75)
+    for i in 1:length(dt_list)
+        @printf("%-12.4e %-12.4e %-12.4e %-12.4e %-8.2f %-8.2f %-8.2f\n",
+                dt_list[i], errors_x[i], errors_g[i], errors_s[i],
+                ord_x[i], ord_g[i], ord_s[i])
+    end
+    println("=" ^ 75)
+
+    mkpath(output_dir)
+    csv_path = joinpath(output_dir, "particle_temporal_convergence.csv")
+    open(csv_path, "w") do io
+        println(io, "dt,e_pos,e_circ,e_sigma,ord_pos,ord_circ,ord_sigma")
+        for i in 1:length(dt_list)
+            @printf(io, "%.6e,%.6e,%.6e,%.6e,%.2f,%.2f,%.2f\n",
+                    dt_list[i], errors_x[i], errors_g[i], errors_s[i],
+                    ord_x[i], ord_g[i], ord_s[i])
+        end
+    end
+    println("CSV written: $csv_path")
+    return results
+end
+
+# ---------------------------------------------------------------------------
 # 8. COUPLED RUN ERROR LOADING
 #
 # When coupled MMS results are stored (by the production solver + mms_rk3.jl),
 # this function loads the particle state at the final time and computes errors.
 # ---------------------------------------------------------------------------
 
-function run_coupled_errors(manifest::Dict, result_path::AbstractString,
+function run_coupled_errors(manifest::AbstractDict, result_path::AbstractString,
                              output_dir::AbstractString)
     println("=" ^ 70)
     println("PARTICLE-LEVEL MMS  — Coupled Run Errors")
@@ -615,21 +788,23 @@ function run_stretching_fd_check(tgt::ParticleTarget, U_inf::Vector{Float64},
     h_fd = 1.0e-6
     t0 = 0.05
 
-    _, Gdot_analytic, _ = particle_derivatives(tgt, t0)
+    _, Gdot_analytic, sdot_analytic = particle_derivatives(tgt, t0)
     b = compute_particle_source(tgt, t0, U_inf)
-    G_Gamma = independent_stretching_rhs(
+    G_Gamma, G_sigma = independent_stretching_rhs(
         particle_target_state(tgt, t0)[1],
         particle_target_state(tgt, t0)[2],
         particle_target_state(tgt, t0)[3]
     )
 
-    # Check: Gdot* = G_Gamma + b_Gamma (by definition of source)
-    residual = Gdot_analytic .- G_Gamma .- b.bGamma
-    max_res = maximum(norm(residual[:, p]) for p in 1:tgt.n)
-    @printf("  Stretching source definition residual: %.4e (should be 0 by construction)\n",
-            max_res)
-    if max_res > 1e-12
-        @warn "Stretching source definition residual exceeds 1e-12 — check implementation"
+    # Check: Gdot* = G_Gamma + b_Gamma and sdot* = G_sigma + b_sigma
+    residual_g = Gdot_analytic .- G_Gamma .- b.bGamma
+    residual_s = sdot_analytic .- G_sigma .- b.bsigma
+    max_res_g = maximum(norm(residual_g[:, p]) for p in 1:tgt.n)
+    max_res_s = maximum(abs(residual_s[p]) for p in 1:tgt.n)
+    @printf("  Stretching source definition residual: %.4e (circulation), %.4e (core)\n",
+            max_res_g, max_res_s)
+    if max_res_g > 1e-12 || max_res_s > 1e-12
+        @warn "Source definition residual exceeds 1e-12 — check implementation"
     else
         println("  FD consistency check: PASSED")
     end
@@ -643,7 +818,8 @@ function run_stretching_fd_check(tgt::ParticleTarget, U_inf::Vector{Float64},
 
     mkpath(output_dir)
     write_json(joinpath(output_dir, "stretching_fd_check.json"), Dict(
-        "t0" => t0, "max_definition_residual" => max_res, "fd_derivative_error" => err_fd
+        "t0" => t0, "max_definition_residual" => max_res_g,
+        "max_core_definition_residual" => max_res_s, "fd_derivative_error" => err_fd
     ))
 end
 
@@ -729,6 +905,7 @@ function main(args::Vector{String} = ARGS)
 
     if study == "refinement" || study == "all"
         run_refinement_study(manifest, output_dir)
+        run_particle_time_refinement(tgt, manifest, output_dir)
     end
 
     if study == "coupled" || study == "all"
