@@ -66,10 +66,13 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
-import sympy as sp
+try:
+    import sympy as sp
+except ImportError:
+    sp = None
 import yaml
 
 # ---------------------------------------------------------------------------
@@ -216,6 +219,11 @@ class StructuralTarget:
 # ---------------------------------------------------------------------------
 
 def _make_sympy_symbols():
+    if sp is None:
+        raise ImportError(
+            "SymPy is required for symbolic plate MMS derivation. "
+            "Please run inside an environment with sympy installed (e.g. fenics-env)."
+        )
     return sp.symbols("x y t", real=True)
 
 
@@ -414,9 +422,9 @@ def build_plate_mms_sympy(config: dict, nonlinear: bool = True,
 @dataclass
 class PlateMMS:
     """Container for all symbolic plate MMS quantities."""
-    x: sp.Symbol
-    y: sp.Symbol
-    t: sp.Symbol
+    x: Any
+    y: Any
+    t: Any
     fields: tuple          # (u, w, theta) SymPy expressions
     loads: tuple           # (f_u, f_w, f_theta)  — independent strong-form loads
     kinematics: dict
@@ -1016,9 +1024,272 @@ def build_mms_manifest(solid: dict, fluid: dict, coupling: dict,
     }
 
 
+_THIS_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _THIS_DIR.parent.parent
+
+
 def write_manifest(manifest: dict, path: str | Path) -> Path:
     """Serialize manifest to JSON."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(manifest, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     return path
+
+
+# ---------------------------------------------------------------------------
+# 13. COUPLED MMS TARGET CONTAINER & INTERACTION HOOKS
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class CoupledMMSTarget:
+    """Complete coupled target container loaded from manifest JSON."""
+    structural: StructuralTarget
+    geometry: GeometryTarget
+    particles: ParticlePopulation
+    bound_circulation: BoundCirculationTarget
+    n_span: int
+    y_stations: np.ndarray
+    chord: float
+    tip_chord: float
+    freestream: dict
+    T: float = 0.0
+
+    @property
+    def panel_edges(self) -> np.ndarray:
+        return np.linspace(0.0, float(self.structural.Ly), int(self.n_span) + 1)
+
+    def panel_force(self, t: float) -> np.ndarray:
+        """Kutta–Joukowski target force at each bound station at time t."""
+        eta = (np.arange(self.n_span, dtype=float) + 0.5) / self.n_span
+        gamma = self.bound_circulation.state(t)
+        rho = float(self.freestream["rho"])
+        speed = float(self.freestream["vinf"])
+        aoa = math.radians(float(self.freestream.get("aoa_deg", 0.0)))
+        gradient = np.asarray(self.freestream.get("gradient", np.zeros(9)), dtype=float).reshape(3, 3).T
+        amplitudes = np.asarray(self.freestream.get("oscillation", np.zeros(3)), dtype=float)
+        wave = np.asarray(self.freestream.get("wavenumber", np.zeros(3)), dtype=float)
+        reference = np.asarray(self.freestream.get("reference", np.zeros(3)), dtype=float)
+        frequency = float(self.freestream.get("frequency_hz", 0.0))
+        phase0 = math.radians(float(self.freestream.get("phase_deg", 0.0)))
+
+        force = np.zeros((self.n_span, 3), dtype=float)
+        dt = float(t)
+        xb = float(self.geometry.x_bound if self.geometry.x_bound is not None else 0.25 * self.structural.Lx)
+        for i, eta_i in enumerate(eta):
+            y = float(self.y_stations[i])
+            x = xb
+            surface_velocity = self.geometry.velocity(x, y, dt)
+            point = self.geometry.point(x, y, dt)
+            xp = point - reference
+            base = speed * np.asarray((math.cos(aoa), 0.0, math.sin(aoa)))
+            gust_phase = 2.0 * math.pi * frequency * dt + phase0
+            gust = amplitudes * np.sin(gust_phase + np.asarray((wave[1] * xp[1], wave[2] * xp[2], wave[0] * xp[0])))
+            local_velocity = base + gradient @ xp + gust - surface_velocity
+            chord_i = self.tip_chord * (1.0 - eta_i) + self.chord * eta_i
+            circulation_line = np.asarray((0.0, chord_i, 0.0))
+            force[i] = rho * gamma[i] * np.cross(local_velocity, circulation_line)
+        return force
+
+    @classmethod
+    def from_manifest(cls, data: dict) -> "CoupledMMSTarget":
+        """Reconstruct CoupledMMSTarget from manifest JSON dictionary."""
+        Lx = float(data["Lx"])
+        Ly = float(data["Ly"])
+        structural = StructuralTarget(Lx, Ly, data["structural"]["components"])
+        geometry = GeometryTarget(structural, float(data["sweep"]), float(data["x_bound"]))
+        p_pop = ParticlePopulation.from_dict(data["particles"], lambda_sigma=float(data.get("lambda_sigma", 2.0)))
+        bc_data = data["bound_circulation"]
+        bound_circ = BoundCirculationTarget(
+            gamma0=np.asarray(bc_data["gamma0"], dtype=float),
+            a=np.asarray(bc_data["a"], dtype=float),
+            b=np.asarray(bc_data["b"], dtype=float),
+            omega=float(bc_data["omega"]),
+        )
+        return cls(
+            structural=structural,
+            geometry=geometry,
+            particles=p_pop,
+            bound_circulation=bound_circ,
+            n_span=int(data["n_span"]),
+            y_stations=np.asarray(data["y_stations"], dtype=float),
+            chord=float(data["chord"]),
+            tip_chord=float(data.get("tip_chord", data["chord"])),
+            freestream=data["freestream"],
+            T=float(data.get("T", 0.0)),
+        )
+
+
+def _scalar_expression_code(target: CoupledMMSTarget, name: str, t: float, order: int = 0) -> str:
+    spec = target.structural.components[name]
+    amp, omega, mode = float(spec["amplitude"]), float(spec["omega"]), spec["mode"]
+    phase = f"({omega:.17g}*targ_t)"
+    if mode == "cos":
+        factors = (f"cos({phase})", f"(-{omega:.17g})*sin({phase})", f"(-{omega**2:.17g})*cos({phase})")
+    elif mode == "sin":
+        factors = (f"sin({phase})", f"{omega:.17g}*cos({phase})", f"(-{omega**2:.17g})*sin({phase})")
+    elif mode == "ramp":
+        factors = (f"(1-cos({phase}))", f"{omega:.17g}*sin({phase})", f"{omega**2:.17g}*cos({phase})")
+    else:
+        raise ValueError(f"unsupported mode {mode!r}")
+    Lx, Ly = float(target.structural.Lx), float(target.structural.Ly)
+    B = f"pow(sin(pi*x[0]/{Lx:.17g}),4)*pow(sin(pi*x[1]/{Ly:.17g}),4)"
+    return f"{amp:.17g}*({B})*({factors[order]})"
+
+
+def _target_function(model, target: CoupledMMSTarget, t: float, order: int, spaces: list):
+    """Interpolate analytical target fields into the production mixed FE space."""
+    from dolfin import Expression, interpolate, Function, FunctionAssigner
+    Vu = spaces[0][0] if isinstance(spaces[0], tuple) else spaces[0]
+    Vw = spaces[1][0] if isinstance(spaces[1], tuple) else spaces[1]
+    Vtheta = spaces[2][0] if isinstance(spaces[2], tuple) else spaces[2]
+
+    uexpr = Expression((_scalar_expression_code(target, "u", t, order),
+                        _scalar_expression_code(target, "v", t, order)), degree=8, targ_t=float(t))
+    wexpr = Expression(_scalar_expression_code(target, "w", t, order), degree=8, targ_t=float(t))
+    thetexpr = Expression((_scalar_expression_code(target, "theta_x", t, order),
+                           _scalar_expression_code(target, "theta_y", t, order)), degree=8, targ_t=float(t))
+
+    u = interpolate(uexpr, Vu)
+    w = interpolate(wexpr, Vw)
+    theta = interpolate(thetexpr, Vtheta)
+
+    out = Function(model.V)
+    FunctionAssigner(model.V, [Vu, Vw, Vtheta]).assign(out, [u, w, theta])
+    return out
+
+
+class ReferenceForceFunctional:
+    """Computes virtual work of aerodynamic target forces on the plate surface."""
+
+    def __init__(self, model, target: CoupledMMSTarget):
+        self.model = model
+        self.target = target
+        fs = target.freestream
+        self.pressure_scale = 0.01 * 0.5 * float(fs["rho"]) * float(fs["vinf"]) ** 2
+        self.omega = 2.3
+        self.panel_forces = None
+        self.panel_edges = np.linspace(0.0, float(target.structural.Ly), int(target.n_span) + 1)
+
+    def set_panel_forces(self, forces: np.ndarray):
+        forces = np.asarray(forces, dtype=float).reshape(-1, 3)
+        self.panel_forces = forces.copy()
+
+    def work(self, t: float, dq):
+        from dolfin import as_vector, dot, UserExpression
+        if self.panel_forces is None:
+            pressure = self.pressure_scale * math.sin(self.omega * float(t))
+            traction = as_vector((0.0, 0.0, pressure))
+        else:
+            class PanelPressure(UserExpression):
+                def __init__(self, parent, **kwargs):
+                    self.parent = parent
+                    super().__init__(**kwargs)
+
+                def eval(self, values, x):
+                    j = min(max(int(np.searchsorted(self.parent.panel_edges, x[1], side="right") - 1), 0),
+                            len(self.parent.panel_forces) - 1)
+                    dy = self.parent.panel_edges[j + 1] - self.parent.panel_edges[j]
+                    eta = (j + 0.5) / len(self.parent.panel_forces)
+                    chord = self.parent.target.tip_chord * (1.0 - eta) + self.parent.target.chord * eta
+                    density = self.parent.panel_forces[j] / max(chord * dy, 1e-15)
+                    values[0], values[1], values[2] = density
+
+                def value_shape(self):
+                    return (3,)
+
+            traction = PanelPressure(self, degree=0)
+        return dot(self.model.displacement_3d(dq), traction) * self.model.dx
+
+    def vector(self, t: float):
+        from dolfin import assemble
+        return assemble(self.work(t, self.model.q_test))
+
+
+def add_coupled_mms_source(model, target: CoupledMMSTarget, t: float,
+                           reference_force: ReferenceForceFunctional, spaces: list):
+    """Assembles the independent manufactured structural source for the coupled FSI solve.
+
+    f_s^* = M(q_s^*) + C(q_dot_s^*) + K(q_s^*) - F_s^*
+
+    INDEPENDENCE GUARANTEE:
+    This source is assembled directly from the independent continuous strong-form
+    Reissner–Mindlin differential operator integrated against test functions,
+    minus the independent analytical interface force reference_force.
+    It does NOT call model.mass_form(), model.damping_form(), or model.internal_work().
+    """
+    from dolfin import Expression, assemble, inner, split, dx
+    import re
+    global _CACHED_MMS_FORMS
+
+    # Lazy initialization and caching of symbolic load expressions on the model
+    if not hasattr(model, "_mms_force_expressions"):
+        cfg = {
+            "root_chord": target.structural.Lx,
+            "span": target.structural.Ly,
+            "E": model.E,
+            "nu": model.nu,
+            "rho_s": model.rho,
+            "thickness_ratio": float(model.domain.h) / float(target.structural.Lx),
+            "eta_m": model.eta_m,
+            "eta_k": model.eta_k,
+            "kappa_shear": model.kappa_shear,
+        }
+        nonlinear = getattr(model, "geometric_nonlinearity", True)
+        mms_sym = build_plate_mms_sympy(cfg, nonlinear=nonlinear, components=target.structural.components)
+
+        def _clean_code(expr):
+            code = sp.ccode(expr)
+            code = re.sub(r"\bx\b", "x[0]", code)
+            return re.sub(r"\by\b", "x[1]", code)
+
+        fu_code = tuple(_clean_code(mms_sym.loads[0][i]) for i in range(2))
+        fw_code = _clean_code(mms_sym.loads[1])
+        fth_code = tuple(_clean_code(mms_sym.loads[2][i]) for i in range(2))
+
+        model._mms_fu = Expression(fu_code, degree=8, t=float(t))
+        model._mms_fw = Expression(fw_code, degree=8, t=float(t))
+        model._mms_fth = Expression(fth_code, degree=8, t=float(t))
+
+        test_u, test_w, test_theta = split(model.q_test)
+        source_measure = dx(domain=model.domain.mesh, metadata={"quadrature_degree": 24})
+        model._mms_source_form = (
+            inner(model._mms_fu, test_u)
+            + model._mms_fw * test_w
+            + inner(model._mms_fth, test_theta)
+        ) * source_measure
+
+    # Update continuous evaluation time
+    model._mms_fu.t = float(t)
+    model._mms_fw.t = float(t)
+    model._mms_fth.t = float(t)
+
+    source = assemble(model._mms_source_form)
+    source.axpy(-1.0, reference_force.vector(float(t)))
+    for bc in model.bcs:
+        bc.apply(source)
+    return source
+
+
+def build_default_target(config: str | Path | dict, T: float, n_span_override: Optional[int] = None) -> CoupledMMSTarget:
+    """Helper for backwards compatibility: builds default target from config."""
+    if isinstance(config, (str, Path)):
+        c_dir = Path(config)
+        def _r(name):
+            with open(c_dir / name, encoding="utf-8") as fh:
+                return yaml.safe_load(fh)
+        solid = _r("solid_params.yaml")
+        fluid = _r("fluid_params.yaml")
+        coupling = _r("coupling_params.yaml")
+    else:
+        solid, fluid, coupling = config["solid"], config["fluid"], config["coupling"]
+
+    mms_yaml = _REPO_ROOT / "verification/mms/mms_parameters.yaml"
+    with open(mms_yaml, encoding="utf-8") as fh:
+        mms_params = yaml.safe_load(fh)
+
+    manifest = build_mms_manifest(solid, fluid, coupling, mms_params, refinement_level=1)
+    if n_span_override is not None:
+        manifest["n_span"] = int(n_span_override)
+        manifest["y_stations"] = ((np.arange(manifest["n_span"]) + 0.5) / manifest["n_span"] * float(solid["span"])).tolist()
+    manifest["T"] = float(T)
+    return CoupledMMSTarget.from_manifest(manifest)

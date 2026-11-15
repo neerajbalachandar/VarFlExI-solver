@@ -18,8 +18,8 @@ import numpy as np
 import yaml
 from pathlib import Path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from verification.mms.coupled_target import CoupledMMSTarget as PythonMMSTarget
-from verification.mms.coupled_solid_source import (
+from verification.mms.mms_problem import (
+    CoupledMMSTarget as PythonMMSTarget,
     ReferenceForceFunctional, add_coupled_mms_source, _target_function,
 )
 

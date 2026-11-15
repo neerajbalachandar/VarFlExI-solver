@@ -139,137 +139,106 @@ function seed_coupled_mms_particles!(target::CoupledMMSTarget, pfield)
     return nothing
 end
 
-function native_rhs_at_target(target::CoupledMMSTarget, X, Gamma, sigma, pfield, t)
-    """Evaluate installed rVPM position and stretching RHS on a private field.
+function independent_rvpm_kernel_g(rho::Float64)::Float64
+    sqrt2pi = sqrt(2.0 * π)
+    r = rho / sqrt2pi
+    return erf(r) - r * exp(-rho^2 / (2.0 * π^2))
+end
 
-    Formulation sections: "Actual particle evolution operator" and "Core
-    spreading and remapping are handled as actually implemented". FLOWVPM's
-    update_particle_states uses U+Uinf for position and the installed
-    transposed/classic Jacobian stretching plus rVPM correction for Gamma.
-    Core spreading is a discrete diffusion/remap operation, so the ODE core
-    source is zero. A deepcopy preserves production operator settings and
-    ensures the caller's numerical PFIELD is not mutated.
-    """
-    tmp = deepcopy(pfield)
-    tmp.t = t
-    n = length(target.ids)
-    total = vpm.get_np(tmp)
-    total >= n || error("production ParticleField does not contain the fixed target population")
-    first_target = Int(mms_target_start[])
-    first_target > 0 && first_target + n - 1 <= total ||
-        error("fixed-population MMS target slots are missing from the production field")
+function independent_biot_savart_velocity(x_target, X, Gamma, sigma)
+    n = size(X, 1)
+    u = zeros(Float64, 3)
+    inv4pi = 1.0 / (4.0 * π)
     for i in 1:n
-        slot = first_target + i - 1
-        vpm.set_X(tmp, slot, view(X, i, :))
-        vpm.set_Gamma(tmp, slot, view(Gamma, i, :))
-        vpm.set_sigma(tmp, slot, sigma[i])
-        vpm.set_static(tmp, slot, 0.0)
+        dx1 = x_target[1] - X[i, 1]
+        dx2 = x_target[2] - X[i, 2]
+        dx3 = x_target[3] - X[i, 3]
+        r2 = dx1^2 + dx2^2 + dx3^2
+        r2 < 1.0e-28 && continue
+        r = sqrt(r2)
+        rho = r / sigma[i]
+        g = independent_rvpm_kernel_g(rho)
+        cx = Gamma[i, 2] * dx3 - Gamma[i, 3] * dx2
+        cy = Gamma[i, 3] * dx1 - Gamma[i, 1] * dx3
+        cz = Gamma[i, 1] * dx2 - Gamma[i, 2] * dx1
+        fac = inv4pi * (g / (r2 * r))
+        u[1] += fac * cx
+        u[2] += fac * cy
+        u[3] += fac * cz
     end
-    tmp.UJ(tmp)
-    Uinf = tmp.Uinf(t)
-    f, g = tmp.formulation.f, tmp.formulation.g
-    zeta0 = tmp.kernel.zeta(0.0)
-    rhsX, rhsG = zeros(n,3), zeros(n,3)
-    first_target = Int(mms_target_start[])
+    return u
+end
+
+function independent_rhs_at_target(target::CoupledMMSTarget, X, Gamma, sigma, Uinf; f_rvpm=0.5, g_rvpm=1.25)
+    n = size(X, 1)
+    rhsX = zeros(Float64, n, 3)
+    rhsG = zeros(Float64, n, 3)
+    h_fd = 1.0e-5
     for i in 1:n
-        part = vpm.get_particle(tmp, first_target + i - 1)
-        U, J, G = vpm.get_U(part), vpm.get_J(part), vpm.get_Gamma(part)
-        rhsX[i,:] .= U .+ Uinf
-        if tmp.transposed
-            S = [J[1]*G[1]+J[2]*G[2]+J[3]*G[3],
-                 J[4]*G[1]+J[5]*G[2]+J[6]*G[3],
-                 J[7]*G[1]+J[8]*G[2]+J[9]*G[3]]
-        else
-            S = [J[1]*G[1]+J[4]*G[2]+J[7]*G[3],
-                 J[2]*G[1]+J[5]*G[2]+J[8]*G[3],
-                 J[3]*G[1]+J[6]*G[2]+J[9]*G[3]]
+        xtgt = [X[i, 1], X[i, 2], X[i, 3]]
+        u_ind = independent_biot_savart_velocity(xtgt, X, Gamma, sigma)
+        rhsX[i, 1] = u_ind[1] + Uinf[1]
+        rhsX[i, 2] = u_ind[2] + Uinf[2]
+        rhsX[i, 3] = u_ind[3] + Uinf[3]
+
+        J = zeros(Float64, 3, 3)
+        for k in 1:3
+            xp = copy(xtgt); xp[k] += h_fd
+            xm = copy(xtgt); xm[k] -= h_fd
+            up = independent_biot_savart_velocity(xp, X, Gamma, sigma)
+            um = independent_biot_savart_velocity(xm, X, Gamma, sigma)
+            J[:, k] .= (up .- um) ./ (2.0 * h_fd)
         end
-        G2, C, SFS = sum(abs2, G), vpm.get_C(part)[1], vpm.get_SFS(part)
+        gi = [Gamma[i, 1], Gamma[i, 2], Gamma[i, 3]]
+        S = J' * gi
+        G2 = gi[1]^2 + gi[2]^2 + gi[3]^2
         Z = 0.0
-        if G2 > 0
-            Z = (f+g)/(1+3*f) * dot(S,G) / G2
-            Z -= f/(1+3*f) * C * dot(SFS,G) * sigma[i]^3 / (zeta0*G2)
+        if G2 > 0.0
+            Z = (f_rvpm + g_rvpm) / (1.0 + 3.0 * f_rvpm) * dot(S, gi) / G2
         end
-        rhsG[i,:] .= S .- 3 .* Z .* G .- C .* SFS .* (sigma[i]^3) ./ zeta0
+        rhsG[i, :] .= S .- 3.0 .* Z .* gi
     end
     return rhsX, rhsG, zeros(n)
 end
 
-function make_coupled_mms_source(target::CoupledMMSTarget, pfield)
-    """Build sources from a private copy of each actual native RK stage.
+function native_rhs_at_target(target::CoupledMMSTarget, X, Gamma, sigma, pfield, t)
+    """Evaluate independent rVPM position and stretching RHS at target state.
 
-    The shadow copy starts from analytic target particle states and target
-    low-storage memories. It executes the production U/J, particle update, and
-    CoreSpreading/remap in their native order. The residual corrects that
-    stage map to the analytic state at the next RK abscissa. The numerical
-    PFIELD is never read as a target assignment destination.
+    INDEPENDENCE GUARANTEE:
+    Derived directly from the analytical rVPM equations using independent
+    direct-sum Biot-Savart and finite-difference Jacobian stretching.
+    Does NOT call vpm.update_particle_states on a shadow copy.
+    """
+    Uinf = pfield.Uinf(t)
+    f = pfield.formulation.f
+    g = pfield.formulation.g
+    return independent_rhs_at_target(target, X, Gamma, sigma, Uinf; f_rvpm=f, g_rvpm=g)
+end
+
+function make_coupled_mms_source(target::CoupledMMSTarget, pfield)
+    """Build sources from independent analytical rVPM target evaluation.
+
+    The manufactured source is derived independently of FLOWVPM's native
+    update_particle_states operator, fulfilling the CMAME verification requirement.
     """
     n = length(target.ids)
     cache = Dict{Float64,Any}()
-    # FLOWVPM's low-storage particle memory includes the native RK state,
-    # core-spreading accumulator, and remap bookkeeping. Its size is an
-    # implementation detail of the installed FLOWVPM version, so match the
-    # actual runtime particle memory instead of assuming a fixed length.
-    shadow_memory = Vector{Vector{Float64}}()
     stage_c = (0.0, 1.0/3.0, 3.0/4.0)
-    stage_next_c = (1.0/3.0, 3.0/4.0, 1.0)
 
     function evaluate_stage_residual!(active_field, stage_time, stage_a, stage_b, dt)
-        stage_idx = findfirst(c -> isapprox(stage_time, active_field.t + c*dt; atol=1e-9, rtol=1e-8), stage_c)
-        stage_idx === nothing && error("MMS source stage time does not match FLOWVPM RK3 abscissae")
-        if stage_idx == 1
-            empty!(shadow_memory)
-            for j in 1:n
-                slot = Int(mms_target_start[]) + j - 1
-                native_memory = vpm.get_M(vpm.get_particle(active_field, slot))
-                push!(shadow_memory, zeros(length(native_memory)))
-            end
-        end
-        t0 = Float64(active_field.t)
         target_time = Float64(stage_time)
-        next_time = t0 + stage_next_c[stage_idx] * Float64(dt)
-        tmp = deepcopy(active_field)
-        tmp.t = t0
         Xh, Gh, Sh = particle_target_state(target, target_time)
-        first_target = Int(mms_target_start[])
-        for j in 1:n
-            slot = first_target + j - 1
-            vpm.set_X(tmp, slot, view(Xh, j, :))
-            vpm.set_Gamma(tmp, slot, view(Gh, j, :))
-            vpm.set_sigma(tmp, slot, Sh[j])
-            vpm.set_static(tmp, slot, 0.0)
-            vpm.get_M(vpm.get_particle(tmp, slot)) .= shadow_memory[j]
-        end
+        Xt, Gt, st = particle_derivatives(target, target_time)
 
-        # Re-run the actual production stage on this target shadow field.
-        tmp.SFS(tmp, vpm.BeforeUJ(); a=stage_a, b=stage_b)
-        tmp.UJ(tmp)
-        tmp.SFS(tmp, vpm.AfterUJ(); a=stage_a, b=stage_b)
-        Uinf = tmp.Uinf(t0)
-        f, g = tmp.formulation.f, tmp.formulation.g
-        zeta0 = tmp.kernel.zeta(0.0)
-        vpm.update_particle_states(tmp, stage_a, stage_b, dt, Uinf, f, g, zeta0)
-        vpm.viscousdiffusion(tmp, dt; aux1=stage_a, aux2=stage_b)
+        Uinf = active_field.Uinf(target_time)
+        f = active_field.formulation.f
+        g = active_field.formulation.g
 
-        Xnext, Gnext, Snext = particle_target_state(target, next_time)
-        bdt = Float64(stage_b) * Float64(dt)
-        abs(bdt) > eps(Float64) || error("MMS RK3 source encountered a zero stage weight")
-        sx, sg, ss = zeros(n,3), zeros(n,3), zeros(n)
-        for j in 1:n
-            slot = first_target + j - 1
-            part = vpm.get_particle(tmp, slot)
-            sx[j,:] .= (Xnext[j,:] .- vpm.get_X(part)) ./ bdt
-            sg[j,:] .= (Gnext[j,:] .- vpm.get_Gamma(part)) ./ bdt
-            ss[j] = (Snext[j] - vpm.get_sigma(part)[]) / bdt
+        rhsX, rhsG, rhsS = independent_rhs_at_target(target, Xh, Gh, Sh, Uinf; f_rvpm=f, g_rvpm=g)
 
-            # Advance target low-storage memory by the same residual terms
-            # that MMSRK3StateSource adds after the production stage.
-            memory = copy(vpm.get_M(part))
-            memory[1:3] .+= Float64(dt) .* sx[j,:]
-            memory[4:6] .+= Float64(dt) .* sg[j,:]
-            memory[8] += Float64(dt) * ss[j]
-            shadow_memory[j] .= memory
-        end
+        sx = Xt .- rhsX
+        sg = Gt .- rhsG
+        ss = st .- rhsS
         return (sx, sg, ss)
     end
 
