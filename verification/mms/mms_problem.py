@@ -1001,6 +1001,11 @@ def build_mms_manifest(solid: dict, fluid: dict, coupling: dict,
             "Coupled structural source: independent weak-form body-force assembly."
         ),
         "refinement_level": refinement_level,
+        "studies": {
+            "particle_temporal": mms_params["particles"]["temporal_study"],
+            "particle_population": mms_params["particles"]["population_study"],
+            "interface_transfer": mms_params["interface_traction"],
+        },
         "lambda_sigma": lambda_sigma,
         "Lx": Lx, "Ly": Ly,
         "n_span": n_span,
@@ -1023,6 +1028,10 @@ def build_mms_manifest(solid: dict, fluid: dict, coupling: dict,
         },
         "particles": particles.to_dict(),
         "bound_circulation": bound_circ.to_dict(),
+        "bound_circulation_status": (
+            "inactive in the coupled force path; the runtime target force comes "
+            "from the target-state production VLM branch"
+        ),
         "particle_formulas": {
             "position": "X0 + a*sin(omega_x*t) + b*(1-cos(omega_x*t))",
             "circulation": "Gamma0 + c*sin(omega_gamma*t) + d*(1-cos(omega_gamma*t))",
@@ -1031,9 +1040,28 @@ def build_mms_manifest(solid: dict, fluid: dict, coupling: dict,
             "position_rhs": "independent Biot-Savart: Biot_Savart_sum(X*, Gamma*, sigma*) + U_inf",
         },
         "error_norms": {
-            "structural": "FEM quadrature relative L2: (int ||q_h - q*||^2 dOmega / int ||q*||^2 dOmega)^0.5",
-            "particle": "per-component: (sum ||Y_p^h - Y_p*||^2 / sum ||Y_p*||^2)^0.5",
-            "interface": "resultant force, resultant moment, virtual-work defect",
+            "structural": {
+                "e_u0": "relative FE spatial L2(Omega_s) error for u0",
+                "e_v0": "relative FE spatial L2(Omega_s) error for v0",
+                "e_w": "relative FE spatial L2(Omega_s) error for w",
+                "e_theta_x": "relative FE spatial L2(Omega_s) error for theta_x",
+                "e_theta_y": "relative FE spatial L2(Omega_s) error for theta_y",
+                "time_kind": "final time",
+            },
+            "particle": {
+                "e_pos": "relative Frobenius norm of matched position arrays",
+                "e_circ": "relative Frobenius norm of matched circulation arrays",
+                "e_core": "relative Euclidean norm of matched core arrays",
+            },
+            "reconstruction": {
+                "e_velocity": "relative weighted error at fixed physical probes",
+                "e_vorticity": "relative weighted error at fixed physical probes",
+            },
+            "interface": {
+                "e_force": "normalized resultant-force transfer residual",
+                "e_moment": "normalized resultant-moment transfer residual about configured origin",
+                "e_work": "relative virtual-work transfer defect",
+            },
         },
     }
 

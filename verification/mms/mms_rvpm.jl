@@ -3,11 +3,11 @@ mms_rvpm.jl — Julia-side MMS integration for the VarFlExI particle-level rVPM.
 
 SCOPE
 -----
-This file verifies the production RK3 time integrator in FLOWVPM/FLOWUnsteady
-at the PARTICLE LEVEL.  It does NOT claim to verify the continuum Navier–Stokes
-equations; it verifies that the production particle advancer correctly transports
-(X_p, Γ_p, σ_p) under a known source, where the source is derived independently
-of FLOWVPM's internal operators.
+This file verifies the discrete rVPM particle ODE at the PARTICLE LEVEL. It
+does NOT claim to verify the continuum Navier–Stokes equations. Time marching
+uses a stage-faithful MMS adapter that mirrors FLOWVPM's RK3 recurrence and
+calls production state-update operations; it is not an unmodified call to the
+native integrator.
 
 INDEPENDENCE GUARANTEE
 -----------------------
@@ -17,16 +17,18 @@ INDEPENDENCE GUARANTEE
   Stretching source:  computed by finite-difference Jacobian of the independent
                       Biot-Savart field (function `independent_stretching_rhs`),
                       NOT by calling vpm.update_particle_states on a shadow copy.
-  Core source:        set to zero (inviscid reference; no CoreSpreading for
-                      discrete remapping scheme).
+  Core source:        includes the stretching-induced term
+                      b_sigma = sigma_dot* + sigma* Z. Viscous diffusion and
+                      remapping are separate production operations; they are
+                      not included in this independently derived source.
 
 PRODUCTION HOOKS
 ----------------
 This file provides `compute_particle_source(target, t, U_inf)` which returns
 the source vector `b_p* = Ẏ_p* − G_p^independent(Y_p*, t)` for all particles.
-The production RK3 adapter `fluid/src/mms_rk3.jl` injects this source into
-the FLOWVPM solver via the `MMSRK3StateSource` struct.  The RK3 integrator
-itself is NOT duplicated here.
+The stage-faithful RK3 adapter `fluid/src/mms_rk3.jl` injects this source via
+`MMSRK3StateSource`. The adapter mirrors the installed stage recurrence and
+calls production state-update operations.
 
 CLI
 ---
@@ -40,7 +42,7 @@ Studies:
     standalone   Build particle population from manifest; compute sources
                  and report b_p* at selected times (no time marching).
     coupled      Load a coupled-run result JSON; compute errors vs. target.
-    refinement   Spatial refinement study over particle population sizes.
+    refinement   Particle-population source-scaling study (not solution convergence).
 """
 
 using LinearAlgebra
@@ -368,25 +370,34 @@ Arguments
 
 Returns
 -------
-  Named tuple (e_pos, e_circ, e_sigma).
+  Named tuple (e_pos, e_circ, e_core).
 """
 function particle_l2_errors(X_num::Matrix{Float64},
                               Gamma_num::Matrix{Float64},
                               sigma_num::Vector{Float64},
                               tgt::ParticleTarget,
                               t::Float64)
+    isfinite(t) || error("Particle error evaluation time must be finite")
     X_star, Gamma_star, sigma_star = particle_target_state(tgt, t)
+    size(X_num) == size(X_star) || error("Position arrays do not preserve fixed particle identity/ordering")
+    size(Gamma_num) == size(Gamma_star) || error("Circulation arrays do not preserve fixed particle identity/ordering")
+    length(sigma_num) == length(sigma_star) || error("Core arrays do not preserve fixed particle identity/ordering")
+    all(isfinite, X_num) && all(isfinite, Gamma_num) && all(isfinite, sigma_num) ||
+        error("Numerical particle state contains non-finite values")
 
     num2(A, B) = sum(norm(A[:, i] .- B[:, i])^2 for i in 1:size(A, 2))
     den2(A)    = sum(norm(A[:, i])^2 for i in 1:size(A, 2))
     num2s(a, b) = sum((a[i] - b[i])^2 for i in eachindex(a))
     den2s(a)    = sum(a[i]^2 for i in eachindex(a))
 
-    e_pos   = sqrt(num2(X_num,     X_star)     / max(den2(X_star),     1e-30))
-    e_circ  = sqrt(num2(Gamma_num, Gamma_star) / max(den2(Gamma_star), 1e-30))
-    e_sigma = sqrt(num2s(sigma_num, sigma_star) / max(den2s(sigma_star), 1e-30))
+    scales = (den2(X_star), den2(Gamma_star), den2s(sigma_star))
+    all(scale -> isfinite(scale) && scale > 0, scales) ||
+        error("Particle target normalization scales must be finite and positive")
+    e_pos   = sqrt(num2(X_num,     X_star)     / scales[1])
+    e_circ  = sqrt(num2(Gamma_num, Gamma_star) / scales[2])
+    e_core  = sqrt(num2s(sigma_num, sigma_star) / scales[3])
 
-    return (e_pos=e_pos, e_circ=e_circ, e_sigma=e_sigma)
+    return (e_pos=e_pos, e_circ=e_circ, e_core=e_core)
 end
 
 # ---------------------------------------------------------------------------
@@ -496,8 +507,9 @@ end
 #   N = n_base * L particles, h_p = Ly / N, σ₀ = λ_σ * h_p
 #
 # For each level, compute the source b_p*(t) at t = t_ref.
-# The convergence of |b_p*|_∞ with N tests that the source is well-defined
-# as the particle population is refined.
+# Source magnitude versus N is a source-scaling study, not solution
+# convergence. Reconstruction error requires fixed probes and an independent
+# reference field.
 #
 # NOTE: Actual time-marching convergence (numerical vs. analytical) requires
 # running the production solver, which is orchestrated by mms_driver.py.
@@ -506,7 +518,7 @@ end
 
 function run_refinement_study(manifest::AbstractDict, output_dir::AbstractString)
     println("=" ^ 70)
-    println("PARTICLE-LEVEL MMS  — Refinement Study (source properties)")
+    println("PARTICLE-LEVEL MMS — Population Source-Scaling Study")
     println("=" ^ 70)
 
     vinf = get(manifest, "freestream", Dict())
@@ -523,7 +535,11 @@ function run_refinement_study(manifest::AbstractDict, output_dir::AbstractString
     n_base = length(p_data["ids"])
     t_ref = 0.05
 
-    levels = [1, 2, 4, 8]
+    study = get(get(manifest, "studies", Dict()), "particle_population", Dict())
+    levels = Int.(get(study, "levels", Int[]))
+    isempty(levels) && error("manifest is missing studies.particle_population.levels")
+    t_ref = Float64(get(study, "evaluation_time", NaN))
+    isfinite(t_ref) || error("manifest is missing a finite particle population evaluation_time")
     rows = []
     for level in levels
         n_particles = n_base * level
@@ -551,7 +567,7 @@ function run_refinement_study(manifest::AbstractDict, output_dir::AbstractString
     end
 
     mkpath(output_dir)
-    result_path = joinpath(output_dir, "particle_refinement_sources.json")
+    result_path = joinpath(output_dir, "particle_source_scaling.json")
     write_json(result_path, Dict("t_ref" => t_ref, "levels" => rows))
     println("Results written: $result_path")
     return rows
@@ -595,32 +611,32 @@ function build_scaled_target(n::Int, Lx::Float64, Ly::Float64,
 end
 
 # ---------------------------------------------------------------------------
-# 7b. REAL PARTICLE TIME REFINEMENT (FLOWVPM native RK3 integrator)
+# 7b. FIXED-POPULATION PARTICLE ODE TIME REFINEMENT (stage-faithful adapter)
 # ---------------------------------------------------------------------------
 
 """
     run_particle_time_refinement(tgt, manifest, output_dir)
 
-Execute real time-step refinement on the particle ODE using FLOWVPM's native
-Runge-Kutta 3 integrator and the stage-aware MMS source adapter MMSRK3StateSource.
+Execute fixed-population time-step refinement using the stage-faithful MMS
+adapter around FLOWVPM production state-update operations.
 
 Verifies:
   - Position evolution:     dX_p/dt = U_BiS(X_p) + U_inf + b_x,p*
   - Circulation evolution:  dΓ_p/dt = S_p - 3 Z_p Γ_p + b_Γ,p*
   - Core-radius evolution:  dσ_p/dt = -σ_p Z_p + b_σ,p*
 
-All three equations are integrated simultaneously. At final time T_end,
-computes numerical-vs-target L² errors and observed convergence orders.
+All three particle-state equations are integrated simultaneously. At final
+time T_end, compute matched particle-state errors and observed order; the
+selected RK scheme does not guarantee a measured convergence rate.
 """
 function run_particle_time_refinement(tgt::ParticleTarget, manifest::AbstractDict, output_dir::AbstractString)
     println("=" ^ 70)
-    println("PARTICLE-LEVEL MMS — FLOWVPM RK3 Temporal Convergence Study")
-    println("Verifying native RK3 integrator with MMSRK3StateSource")
+    println("PARTICLE-LEVEL MMS — RK3 Adapter Temporal Study")
+    println("Using MMSRK3StateSource around production state updates")
     println("=" ^ 70)
 
     if !_HAS_FLOWVPM
-        @warn "FLOWVPM is not installed in current Julia path; skipping ODE integration."
-        return nothing
+        error("FLOWVPM is required for particle ODE time refinement; no result was produced")
     end
     vpm = FLOWVPM
 
@@ -629,8 +645,11 @@ function run_particle_time_refinement(tgt::ParticleTarget, manifest::AbstractDic
     aoa_deg   = Float64(get(vinf_data, "aoa_deg", 0.0))
     U_inf     = [vinf_val * cosd(aoa_deg), 0.0, vinf_val * sind(aoa_deg)]
 
-    T_end = 0.04  # s
-    dt_list = [0.02, 0.01, 0.005, 0.0025]
+    study = get(get(manifest, "studies", Dict()), "particle_temporal", Dict())
+    T_end = Float64(get(study, "duration", NaN))
+    dt_list = Float64.(get(study, "dt_s", Float64[]))
+    (isfinite(T_end) && T_end > 0 && !isempty(dt_list) && all(dt -> dt > 0, dt_list)) ||
+        error("manifest is missing valid studies.particle_temporal duration/dt_s")
 
     errors_x = Float64[]
     errors_g = Float64[]
@@ -682,12 +701,12 @@ function run_particle_time_refinement(tgt::ParticleTarget, manifest::AbstractDic
         errs = particle_l2_errors(X_num, Gamma_num, sigma_num, tgt, T_end)
         push!(errors_x, errs.e_pos)
         push!(errors_g, errs.e_circ)
-        push!(errors_s, errs.e_sigma)
-        @printf("  dt = %.4e s (%3d steps)  e_pos = %.4e  e_circ = %.4e  e_sigma = %.4e\n",
-                dt, n_steps, errs.e_pos, errs.e_circ, errs.e_sigma)
+        push!(errors_s, errs.e_core)
+        @printf("  dt = %.4e s (%3d steps)  e_pos = %.4e  e_circ = %.4e  e_core = %.4e\n",
+                dt, n_steps, errs.e_pos, errs.e_circ, errs.e_core)
         push!(results, Dict(
             "dt" => dt, "n_steps" => n_steps,
-            "e_pos" => errs.e_pos, "e_circ" => errs.e_circ, "e_sigma" => errs.e_sigma
+            "e_pos" => errs.e_pos, "e_circ" => errs.e_circ, "e_core" => errs.e_core
         ))
     end
 
@@ -709,7 +728,7 @@ function run_particle_time_refinement(tgt::ParticleTarget, manifest::AbstractDic
     println("Particle RK3 Temporal Convergence Summary")
     println("=" ^ 75)
     @printf("%-12s %-12s %-12s %-12s %-8s %-8s %-8s\n",
-            "dt (s)", "e_pos", "e_circ", "e_sigma", "ord_pos", "ord_circ", "ord_sigma")
+            "dt (s)", "e_pos", "e_circ", "e_core", "ord_pos", "ord_circ", "ord_core")
     println("-" ^ 75)
     for i in 1:length(dt_list)
         @printf("%-12.4e %-12.4e %-12.4e %-12.4e %-8.2f %-8.2f %-8.2f\n",
@@ -721,7 +740,7 @@ function run_particle_time_refinement(tgt::ParticleTarget, manifest::AbstractDic
     mkpath(output_dir)
     csv_path = joinpath(output_dir, "particle_temporal_convergence.csv")
     open(csv_path, "w") do io
-        println(io, "dt,e_pos,e_circ,e_sigma,ord_pos,ord_circ,ord_sigma")
+        println(io, "dt,e_pos,e_circ,e_core,ord_pos,ord_circ,ord_core")
         for i in 1:length(dt_list)
             @printf(io, "%.6e,%.6e,%.6e,%.6e,%.2f,%.2f,%.2f\n",
                     dt_list[i], errors_x[i], errors_g[i], errors_s[i],
@@ -746,8 +765,7 @@ function run_coupled_errors(manifest::AbstractDict, result_path::AbstractString,
     println("=" ^ 70)
 
     if !isfile(result_path)
-        @warn "Coupled result file not found: $result_path"
-        return nothing
+        error("Coupled result file not found: $result_path")
     end
 
     result = load_json(result_path)
@@ -762,16 +780,16 @@ function run_coupled_errors(manifest::AbstractDict, result_path::AbstractString,
         @printf("  t_final = %.4f s\n", t_final)
         @printf("  e_pos   = %.4e\n", errs.e_pos)
         @printf("  e_circ  = %.4e\n", errs.e_circ)
-        @printf("  e_sigma = %.4e\n", errs.e_sigma)
+        @printf("  e_core  = %.4e\n", errs.e_core)
         mkpath(output_dir)
         write_json(joinpath(output_dir, "coupled_particle_errors.json"), Dict(
             "t_final"  => t_final,
             "e_pos"    => errs.e_pos,
             "e_circ"   => errs.e_circ,
-            "e_sigma"  => errs.e_sigma,
+            "e_core"   => errs.e_core,
         ))
     else
-        @warn "Result JSON missing particle state arrays. Run production solver first."
+        error("Result JSON is missing final particle state arrays; no particle error was computed")
     end
 end
 
@@ -911,7 +929,7 @@ function main(args::Vector{String} = ARGS)
     if study == "coupled" || study == "all"
         result_path = opts["result"]
         if isempty(result_path)
-            @warn "--result not specified for coupled study; skipping."
+            error("--result is required for coupled particle error extraction")
         else
             run_coupled_errors(manifest, result_path, output_dir)
         end

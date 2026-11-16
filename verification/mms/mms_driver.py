@@ -10,10 +10,10 @@ Run from the repository root:
     python verification/mms/mms_driver.py all        [options]
 
 Positional argument (mode):
-    structural   Standalone Reissner–Mindlin plate MMS (spatial + temporal refinement,
-                 Jacobian check, strong/weak check, scalar ODE check).
-    transfer     Interface force/moment transfer MMS (CRM & RBF force/moment conservation
-                 and virtual-work duality).
+    structural   Standalone Reissner–Mindlin plate MMS (spatial + temporal
+                 refinement and scalar ODE check; Jacobian and strong/weak audits
+                 currently report NOT RUN).
+    transfer     Interface force/moment transfer diagnostics (CRM & RBF).
     coupled      Coupled FSI MMS orchestration across refinement levels with
                  independent structural and fluid source injection.
     all          Run structural -> transfer -> coupled in sequence.
@@ -360,65 +360,19 @@ def _check_boundary_conditions(mms, solid):
 
 
 def _run_jacobian_check(mms, solid, output_dir: Path):
-    """Finite-difference Jacobian consistency check on the SymPy source."""
-    logger.info("Running Jacobian FD consistency check …")
-    import sympy as sp
-    x_sym, y_sym, t_sym = mms.x, mms.y, mms.t
-    Lx = float(solid["root_chord"])
-    Ly = float(solid["span"])
-
-    x0, y0, t0 = 0.3 * Lx, 0.6 * Ly, 0.05
-    subs = {x_sym: x0, y_sym: y0, t_sym: t0}
-    f_u = complex(mms.loads[0][0].subs(subs))
-    f_w = complex(mms.loads[1].subs(subs))
-
-    result = {
-        "sample_point": [x0, y0, t0],
-        "f_u_real": float(f_u.real),
-        "f_w_real": float(f_w.real),
-        "status": "passed",
-    }
+    """Record that a production residual/Jacobian check is not available."""
+    result = {"status": "NOT RUN", "reason":
+              "A source sample is not a Jacobian check; this driver has no assembled residual/Jacobian adapter."}
     write_json(output_dir / "structural" / "jacobian_check.json", result)
-    logger.info("  Jacobian check passed.")
+    logger.warning("Structural Jacobian consistency check NOT RUN: %s", result["reason"])
 
 
 def _run_strong_weak_check(mms, solid, output_dir: Path):
-    """Verify strong-form source integral over a smooth test function."""
-    logger.info("Running strong/weak consistency check …")
-    import sympy as sp
-    x_sym, y_sym, t_sym = mms.x, mms.y, mms.t
-    Lx = float(solid["root_chord"])
-    Ly = float(solid["span"])
-    t_test = 0.05
-    subs_t = {t_sym: t_test}
-
-    n_q = 20
-    xi, wi = np.polynomial.legendre.leggauss(n_q)
-    xpts = 0.5 * Lx * (1.0 + xi)
-    ypts = 0.5 * Ly * (1.0 + xi)
-    wx = 0.5 * Lx * wi
-    wy = 0.5 * Ly * wi
-
-    f_w_sym = mms.loads[1].subs(subs_t)
-    f_w_fn = sp.lambdify((x_sym, y_sym), f_w_sym, "numpy")
-
-    def test_v(x, y):
-        return np.sin(np.pi * x / Lx) ** 2 * np.sin(np.pi * y / Ly) ** 2
-
-    integral_fw = 0.0
-    for xi_i, wx_i in zip(xpts, wx):
-        for yj, wyj in zip(ypts, wy):
-            integral_fw += wx_i * wyj * float(f_w_fn(xi_i, yj)) * test_v(xi_i, yj)
-
-    logger.info("  integral_Omega f_w v dOmega = %.6e", integral_fw)
-    result = {
-        "time": t_test,
-        "integral_f_w_v": integral_fw,
-        "n_quad_pts": n_q,
-        "status": "passed",
-    }
+    """Record that full strong-to-weak consistency remains unevaluated."""
+    result = {"status": "NOT RUN", "reason":
+              "The former scalar source integral did not compare the five-field strong and weak functionals or boundary terms."}
     write_json(output_dir / "structural" / "strong_weak_check.json", result)
-    logger.info("  Strong/weak consistency check passed.")
+    logger.warning("Full strong-to-weak consistency check NOT RUN: %s", result["reason"])
 
 
 def _run_scalar_genalpha_check(solid: dict, mms_p: dict, output_dir: Path):
@@ -517,13 +471,18 @@ def _run_plate_refinement_study(mms, solid: dict, mms_p: dict, cases: List[dict]
     def compute_component_l2(model, exact_expressions, time, measure):
         for expr in exact_expressions:
             expr.t = time
-        q_num = split(model.q)
+        u_num, w_num, theta_num = split(model.q)
+        u_exact, w_exact, theta_exact = exact_expressions
+        numerical = (u_num[0], u_num[1], w_num, theta_num[0], theta_num[1])
+        target = (u_exact[0], u_exact[1], w_exact, theta_exact[0], theta_exact[1])
         errs, refs = [], []
-        for val, exact in zip(q_num, exact_expressions):
+        for val, exact in zip(numerical, target):
             e_sq = float(assemble(inner(val - exact, val - exact) * measure))
             r_sq = float(assemble(inner(exact, exact) * measure))
-            errs.append(math.sqrt(max(e_sq, 0.0)))
-            refs.append(math.sqrt(max(r_sq, 1e-30)))
+            if not math.isfinite(e_sq) or not math.isfinite(r_sq) or e_sq < 0.0 or r_sq <= 0.0:
+                raise ValueError("Structural FE spatial L2 error has an invalid or zero target norm")
+            errs.append(math.sqrt(e_sq))
+            refs.append(math.sqrt(r_sq))
         return [e / r for e, r in zip(errs, refs)]
 
     Lx = float(solid["root_chord"])
@@ -662,20 +621,23 @@ def _run_plate_refinement_study(mms, solid: dict, mms_p: dict, cases: List[dict]
 
     # Compute observed convergence orders
     param_header = "h" if study_type == "spatial" else "dt"
-    header = [param_header, "nx", "ny", "dt", "e_u", "e_w", "e_theta", "ord_u", "ord_w", "ord_theta"]
+    component_keys = ("u0", "v0", "w", "theta_x", "theta_y")
+    header = [param_header, "nx", "ny", "dt",
+              *(f"e_{key}" for key in component_keys),
+              *(f"ord_{key}" for key in component_keys)]
 
-    orders_u = observed_order([r[4] for r in results], param_list)
-    orders_w = observed_order([r[5] for r in results], param_list)
-    orders_th = observed_order([r[6] for r in results], param_list)
+    component_orders = [observed_order([r[4 + j] for r in results], param_list)
+                        for j in range(len(component_keys))]
 
     final_rows = []
-    for r, ou, ow, oth in zip(results, orders_u, orders_w, orders_th):
-        final_rows.append(r + [ou, ow, oth])
+    for case_index, result in enumerate(results):
+        final_rows.append(result + [orders[case_index] for orders in component_orders])
 
     csv_path = out_dir / f"structural_{study_type}_convergence.csv"
     write_csv(csv_path, header, final_rows)
     print_table(f"Structural {study_type.capitalize()} Refinement", header, final_rows,
-                ["{:.4e}", "{:d}", "{:d}", "{:.4e}", "{:.4e}", "{:.4e}", "{:.4e}", "{:.2f}", "{:.2f}", "{:.2f}"])
+                ["{:.4e}", "{:d}", "{:d}", "{:.4e}",
+                 *(["{:.4e}"] * 5), *(["{:.2f}"] * 5)])
 
     if not no_plots:
         _plot_convergence(param_list, final_rows, out_dir / f"structural_{study_type}_convergence.pdf",
@@ -692,13 +654,13 @@ def _plot_convergence(x_vals: List[float], rows: List[list], out_path: Path,
         import matplotlib.pyplot as plt
 
         fig, ax = plt.subplots(figsize=(7, 5))
-        labels = ["u (in-plane)", "w (transverse)", "theta (rotation)"]
+        labels = [r"$u_0$", r"$v_0$", r"$w$", r"$\theta_x$", r"$\theta_y$"]
         for col_idx, label in enumerate(labels):
             errs = [r[4 + col_idx] for r in rows]
             ax.loglog(x_vals, errs, "o-", label=label, lw=1.5, ms=5)
 
         x_arr = np.array(x_vals)
-        last_err = rows[-1][5]
+        last_err = rows[-1][4]
         for s in ref_slopes:
             ax.loglog(x_arr, (x_arr / x_arr[-1]) ** s * last_err, "k--", alpha=0.5,
                       label=f"O({param_label[0]}^{s}) reference")
@@ -727,7 +689,7 @@ def run_transfer(solid: dict, fluid: dict, coupling: dict, mms_p: dict,
     logger.info("INTERFACE TRANSFER MMS  (Stage 3)")
     logger.info("=" * 70)
 
-    from mms_problem import interface_traction, exact_panel_force, ErrorNorms
+    from mms_problem import exact_panel_force
 
     out_transfer = output_dir / "transfer"
     out_transfer.mkdir(parents=True, exist_ok=True)
@@ -741,21 +703,18 @@ def run_transfer(solid: dict, fluid: dict, coupling: dict, mms_p: dict,
     )
     omega_t = float(mms_p["interface_traction"]["omega_t"])
 
-    n_span_list = [8, 16, 32, 64]
-    t_val = 0.05
+    n_span_list = [int(n) for n in mms_p["interface_traction"]["n_span_levels"]]
+    t_val = float(mms_p["interface_traction"]["evaluation_time"])
+    n_quad = int(mms_p["interface_traction"]["quadrature_order"])
 
     # 1. Exact Analytical Reference via Gauss-Legendre Quadrature
     logger.info("Evaluating independent analytical interface force reference …")
-    F_exact_total = np.zeros(3)
     panel_forces_by_n = {}
     for n_span in n_span_list:
         p_forces = np.zeros((n_span, 3))
         for j in range(n_span):
-            p_forces[j] = exact_panel_force(j / n_span, (j + 1) / n_span, t_val, T_xyz, omega_t, n_quad=32)
+            p_forces[j] = exact_panel_force(j / n_span, (j + 1) / n_span, t_val, T_xyz, omega_t, n_quad=n_quad)
         panel_forces_by_n[n_span] = p_forces
-
-    F_exact_resultant = sum(exact_panel_force(j / 64, (j + 1) / 64, t_val, T_xyz, omega_t, n_quad=32)
-                            for j in range(64))
 
     if dry_run:
         logger.info("[dry-run] Analytical panel forces evaluated. Skipping production transfer operators.")
@@ -875,8 +834,11 @@ def run_coupled(solid: dict, fluid: dict, coupling: dict, mms_p: dict,
         levels = [1, 2, 4]
 
     manifest_paths = {}
+    manifest_level = (int(mms_p["coupled"].get("temporal_mesh_level", 4))
+                      if study == "temporal" else None)
     for level in levels:
-        manifest = build_mms_manifest(solid, fluid, coupling, mms_p, refinement_level=level)
+        target_level = manifest_level if manifest_level is not None else level
+        manifest = build_mms_manifest(solid, fluid, coupling, mms_p, refinement_level=target_level)
         m_path = out_coupled / f"manifest_level{level}.json"
         write_manifest(manifest, m_path)
         manifest_paths[level] = m_path
@@ -893,18 +855,28 @@ def run_coupled(solid: dict, fluid: dict, coupling: dict, mms_p: dict,
         m_path = manifest_paths[level]
         run_out = out_coupled / f"level_{level}"
         run_out.mkdir(parents=True, exist_ok=True)
-        res = _execute_coupled_case(m_path, run_out, solid, fluid, coupling, mms_p, level)
+        res = _execute_coupled_case(m_path, run_out, solid, fluid, coupling, mms_p, level, study)
         if res:
             coupled_results.append(res)
 
     if coupled_results:
-        hdr = ["level", "dt", "nx", "ny", "n_span", "e_u", "e_w", "e_theta", "e_pos", "e_circ", "vw_defect"]
+        required = ("e_u0", "e_v0", "e_w", "e_theta_x", "e_theta_y",
+                    "e_pos", "e_circ", "e_core", "e_velocity", "e_vorticity",
+                    "e_force", "e_moment", "e_work")
+        for result in coupled_results:
+            missing = [key for key in required if key not in result or
+                       not math.isfinite(float(result[key]))]
+            if missing:
+                raise RuntimeError(
+                    f"Coupled level {result.get('level')} has no complete measured result; "
+                    f"missing/non-finite metrics: {', '.join(missing)}"
+                )
+        hdr = ["level", "dt_f", "dt_s", "nx", "ny", "n_span", *required]
         rows = []
         for r in coupled_results:
             rows.append([
-                r["level"], r["dt"], r["nx"], r["ny"], r["n_span"],
-                r.get("e_u", float("nan")), r.get("e_w", float("nan")), r.get("e_theta", float("nan")),
-                r.get("e_pos", float("nan")), r.get("e_circ", float("nan")), r.get("vw_defect", float("nan")),
+                r["level"], r["dt_f"], r["dt_s"], r["nx"], r["ny"], r["n_span"],
+                *(r[key] for key in required),
             ])
         write_csv(out_coupled / "coupled_convergence.csv", hdr, rows)
         print_table("Coupled FSI MMS Convergence", hdr, rows)
@@ -912,13 +884,19 @@ def run_coupled(solid: dict, fluid: dict, coupling: dict, mms_p: dict,
 
 def _execute_coupled_case(manifest_path: Path, output_dir: Path,
                           solid: dict, fluid: dict, coupling: dict,
-                          mms_p: dict, level: int) -> Optional[dict]:
+                          mms_p: dict, level: int, study: str = "spatial") -> Optional[dict]:
     """Launches production socket-coupled case with MMS manifest."""
-    base_nx = int(mms_p["coupled"]["base_nx"]) * level
-    base_ny = int(mms_p["coupled"]["base_ny"]) * level
+    if str(fluid.get("vpm_sfs", "none")).strip().lower() not in ("none", "off", "false"):
+        raise ValueError("The coupled particle MMS requires vpm_sfs=none; its independent source omits SFS terms")
+    if str(fluid.get("viscous_scheme", "none")).strip().lower() not in ("none", "off", "false"):
+        raise ValueError("The coupled particle MMS requires viscous_scheme=none; its source omits viscous diffusion")
+    mesh_level = (int(mms_p["coupled"].get("temporal_mesh_level", 4))
+                  if study == "temporal" else level)
+    base_nx = int(mms_p["coupled"]["base_nx"]) * mesh_level
+    base_ny = int(mms_p["coupled"]["base_ny"]) * mesh_level
     base_dt = float(mms_p["coupled"]["base_dt"]) / level
     duration = float(mms_p["coupled"]["base_duration"])
-    n_span = int(mms_p["coupled"]["base_n_span"]) * level
+    n_span = int(mms_p["coupled"]["base_n_span"]) * mesh_level
     steps = max(1, int(round(duration / base_dt)))
 
     configs_dir = output_dir / "configs"
@@ -986,18 +964,198 @@ def _execute_coupled_case(manifest_path: Path, output_dir: Path,
 
         codes = [p.poll() for p in procs]
         if any(c != 0 for c in codes):
-            logger.warning("Coupled processes exited with codes %s. See %s", codes, log_file)
-            return None
+            raise RuntimeError(f"coupled processes exited with codes {codes}; see {log_file}")
 
-        # Parse results
-        res = {"level": level, "dt": base_dt, "nx": base_nx, "ny": base_ny, "n_span": n_span}
-        return res
+        # Read actual output histories. A successful process exit is not a
+        # verification result; metrics must come from matched recorded data.
+        return _extract_coupled_metrics(
+            output_dir, level, base_nx, base_ny, n_span, mms_p,
+            str(s_cfg.get("diag_csv_filename", "solid_v18_diagnostics.csv")),
+            duration / steps,
+        )
     except Exception as exc:
-        logger.warning("Coupled run failed to execute: %s", exc)
         for p in procs:
             if p.poll() is None:
                 p.kill()
-        return None
+        raise RuntimeError(f"Coupled level {level} failed or produced invalid MMS data: {exc}") from exc
+
+
+def _read_jsonl_history(path: Path, required_fields: tuple[str, ...]) -> list[dict]:
+    if not path.is_file():
+        raise FileNotFoundError(f"Required MMS history is missing: {path}")
+    records = []
+    with path.open(encoding="utf-8") as stream:
+        for line_no, line in enumerate(stream, 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON in {path}:{line_no}: {exc}") from exc
+            missing = [key for key in required_fields if key not in record]
+            if missing:
+                raise ValueError(f"{path}:{line_no} is missing fields: {', '.join(missing)}")
+            records.append(record)
+    if not records:
+        raise ValueError(f"MMS history is empty: {path}")
+    return records
+
+
+def _relative_array_error(numerical, target, *, label: str) -> float:
+    num = np.asarray(numerical, dtype=float)
+    ref = np.asarray(target, dtype=float)
+    if num.shape != ref.shape or num.size == 0:
+        raise ValueError(f"{label}: target and numerical shapes differ or are empty")
+    if not np.isfinite(num).all() or not np.isfinite(ref).all():
+        raise ValueError(f"{label}: target or numerical values are non-finite")
+    scale = float(np.linalg.norm(ref.ravel()))
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise ValueError(f"{label}: target normalization norm must be positive")
+    return float(np.linalg.norm((num - ref).ravel()) / scale)
+
+
+def _extract_coupled_metrics(output_dir: Path, level: int,
+                             nx: int, ny: int, n_span: int,
+                             mms_p: dict, diagnostics_name: str,
+                             dt_s: float) -> dict:
+    """Extract only measured, time-matched quantities from coupled histories.
+
+    The current structural history contains coefficient vectors but no FE mass
+    norm components. It also has no common-origin moment or virtual-work
+    records. Those missing producer quantities are fatal here: coefficient
+    Euclidean norms are not substituted for spatial FE L2 errors.
+    """
+    fluid_dir, solid_dir = output_dir / "fluid", output_dir / "solid"
+    fluid_path = fluid_dir / "coupled_mms_force_payload_history.jsonl"
+    fluid_records = _read_jsonl_history(fluid_path, (
+        "fluid_time_s", "dt", "target_particle_state", "numerical_particle_state",
+        "fixed_probe_positions_m", "target_probe_velocity_m_s",
+        "numerical_probe_velocity_m_s", "target_probe_vorticity_s_inv",
+        "numerical_probe_vorticity_s_inv", "target_force", "force",
+        "rVPM_RK3_stage_times_s", "target_geometry", "geometry_cp_absolute",
+    ))
+    solid_path = solid_dir / "solid_mms_history.csv"
+    if not solid_path.is_file():
+        raise FileNotFoundError(f"Required structural MMS history is missing: {solid_path}")
+    with solid_path.open(newline="", encoding="utf-8") as stream:
+        reader = csv.DictReader(stream)
+        rows = list(reader)
+        if not reader.fieldnames or not rows:
+            raise ValueError(f"Structural MMS history is empty or has no header: {solid_path}")
+    structural_fields = ("time_s", "target_force", "numerical_force", "target_state", "numerical_state")
+    missing = [field for field in structural_fields if field not in (reader.fieldnames or ())]
+    if missing:
+        raise ValueError(f"Structural MMS history is missing fields: {', '.join(missing)}")
+
+    final_solid = rows[-1]
+    t_s = float(final_solid["time_s"])
+    if not math.isfinite(t_s):
+        raise ValueError("Structural history time_s is non-finite")
+    solid_target = np.asarray(json.loads(final_solid["target_state"]), dtype=float)
+    solid_num = np.asarray(json.loads(final_solid["numerical_state"]), dtype=float)
+    if solid_target.shape != solid_num.shape or solid_target.size == 0 or not (
+            np.isfinite(solid_target).all() and np.isfinite(solid_num).all()):
+        raise ValueError("Structural target/numerical state arrays are empty, mismatched, or non-finite")
+    for field in ("target_force", "numerical_force"):
+        force_history = np.asarray(json.loads(final_solid[field]), dtype=float)
+        if force_history.size == 0 or not np.isfinite(force_history).all():
+            raise ValueError(f"Structural {field} is empty or non-finite")
+    tolerance = float(mms_p.get("coupled", {}).get("time_match_tolerance_s", 1.0e-10))
+    matches = [rec for rec in fluid_records
+               if abs(float(rec["fluid_time_s"]) - t_s) <= tolerance]
+    if len(matches) != 1:
+        raise ValueError(
+            f"Expected exactly one fluid force-exchange record at structural time {t_s:.16g}; "
+            f"found {len(matches)} (tolerance {tolerance:g} s)"
+        )
+    fluid = matches[0]
+
+    stage_times = np.asarray(fluid["rVPM_RK3_stage_times_s"], dtype=float)
+    if stage_times.shape != (3,) or not np.isfinite(stage_times).all():
+        raise ValueError("Fluid record must retain exactly three finite RK3 stage times")
+    dt_f_recorded = float(fluid["dt"])
+    if not math.isfinite(dt_f_recorded) or dt_f_recorded <= 0.0:
+        raise ValueError("Recorded fluid time increment must be finite and positive")
+    expected_stage_times = t_s - dt_f_recorded + dt_f_recorded * np.asarray((0.0, 1.0 / 3.0, 3.0 / 4.0))
+    if not np.allclose(stage_times, expected_stage_times, rtol=0.0,
+                       atol=max(tolerance, abs(dt_f) * 1.0e-12)):
+        raise ValueError(
+            f"Recorded fluid RK3 stages {stage_times.tolist()} do not match expected "
+            f"stage chronology {expected_stage_times.tolist()} ending at force time {t_s:g} s"
+        )
+
+    p_target, p_num = fluid["target_particle_state"], fluid["numerical_particle_state"]
+    particle_metrics = {
+        "e_pos": _relative_array_error(p_num["position"], p_target["position"], label="e_pos"),
+        "e_circ": _relative_array_error(p_num["circulation"], p_target["circulation"], label="e_circ"),
+        "e_core": _relative_array_error(p_num["core"], p_target["core"], label="e_core"),
+    }
+    probes = fluid["fixed_probe_positions_m"]
+    if not probes or not np.isfinite(np.asarray(probes, dtype=float)).all():
+        raise ValueError("Fixed physical probe locations are missing or non-finite")
+    particle_metrics["e_velocity"] = _relative_array_error(
+        fluid["numerical_probe_velocity_m_s"], fluid["target_probe_velocity_m_s"],
+        label="e_velocity")
+    particle_metrics["e_vorticity"] = _relative_array_error(
+        fluid["numerical_probe_vorticity_s_inv"], fluid["target_probe_vorticity_s_inv"],
+        label="e_vorticity")
+
+    origin = np.asarray(mms_p["coupled"]["moment_origin_m"], dtype=float)
+    if origin.shape != (3,) or not np.isfinite(origin).all():
+        raise ValueError("coupled.moment_origin_m must be a finite three-vector")
+    if not np.array_equal(origin, np.zeros(3)):
+        raise ValueError("The current production transfer diagnostics compute moments about [0, 0, 0] m")
+
+    diagnostics_path = solid_dir / diagnostics_name
+    if not diagnostics_path.is_file():
+        raise FileNotFoundError(f"Required structural transfer diagnostics are missing: {diagnostics_path}")
+    with diagnostics_path.open(newline="", encoding="utf-8") as stream:
+        diag_reader = csv.DictReader(stream)
+        diag_rows = list(diag_reader)
+        diag_fields = diag_reader.fieldnames or ()
+    diag_keys = ("time", "force_transfer_relative_error", "moment_transfer_relative_error",
+                 "incremental_work_relative_error")
+    missing_diag = [key for key in diag_keys if key not in diag_fields]
+    if missing_diag or not diag_rows:
+        raise ValueError(f"Transfer diagnostics missing fields/rows: {missing_diag or 'empty history'}")
+    diag_matches = [row for row in diag_rows
+                    if abs(float(row["time"]) - t_s) <= tolerance]
+    if len(diag_matches) != 1:
+        raise ValueError(f"Expected one transfer diagnostic at t={t_s:g} s, found {len(diag_matches)}")
+    diag = diag_matches[0]
+    interface_metrics = {
+        "e_force": float(diag["force_transfer_relative_error"]),
+        "e_moment": float(diag["moment_transfer_relative_error"]),
+        "e_work": float(diag["incremental_work_relative_error"]),
+    }
+    if any(not math.isfinite(value) or value < 0.0 for value in interface_metrics.values()):
+        raise ValueError(f"Transfer diagnostics contain invalid metrics: {interface_metrics}")
+
+    structural_metric_keys = ("e_u0", "e_v0", "e_w", "e_theta_x", "e_theta_y")
+    missing_metrics = [key for key in structural_metric_keys if key not in final_solid]
+    if missing_metrics:
+        raise ValueError(
+            "Structural history lacks componentwise FE spatial L2 metrics: "
+            f"{', '.join(missing_metrics)}. Coefficient arrays are not substituted."
+        )
+    structural_metrics = {key: float(final_solid[key]) for key in structural_metric_keys}
+    if not all(math.isfinite(value) for value in structural_metrics.values()):
+        raise ValueError("Structural FE spatial L2 history contains a non-finite metric")
+    return {
+        "level": level,
+        "dt_f": dt_f_recorded,
+        "dt_s": float(dt_s),
+        "nx": nx,
+        "ny": ny,
+        "n_span": n_span,
+        **structural_metrics,
+        **particle_metrics,
+        **interface_metrics,
+        "final_time_s": t_s,
+        "fluid_stage_times_s": stage_times.tolist(),
+        "moment_origin_m": origin.tolist(),
+        "norm_time_kind": "final-time at the matched fluid force-exchange/structural time",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1040,7 +1198,7 @@ def run_automated_tests(solid: dict, fluid: dict, coupling: dict, mms_p: dict, o
     w_t_fd = (float(mms.fields[1].subs(subs_p)) - float(mms.fields[1].subs(subs_m))) / (2.0 * h_t)
     err_wt = abs(w_t_analytic - w_t_fd) / max(abs(w_t_analytic), 1e-12)
     assert err_wt < 1.0e-7, f"Velocity derivative mismatch: {err_wt}"
-    test_results["target_derivatives"] = {"status": "PASSED", "relative_error": err_wt}
+    test_results["target_derivatives"] = {"status": "PASS", "relative_error": err_wt}
     logger.info("  Target derivatives test: PASSED (rel_err = %.3e)", err_wt)
 
     # Test 2: Boundary compatibility
@@ -1054,7 +1212,7 @@ def run_automated_tests(solid: dict, fluid: dict, coupling: dict, mms_p: dict, o
         else:
             val = sp.simplify(expr)
             assert val == 0, f"Boundary check {name} failed: {val} != 0"
-    test_results["boundary_compatibility"] = {"status": "PASSED", "checks_verified": len(mms.boundary_checks)}
+    test_results["boundary_compatibility"] = {"status": "PASS", "checks_verified": len(mms.boundary_checks)}
     logger.info("  Boundary compatibility test: PASSED (%d boundary conditions verified)", len(mms.boundary_checks))
 
     # Test 3: Source independence
@@ -1064,7 +1222,8 @@ def run_automated_tests(solid: dict, fluid: dict, coupling: dict, mms_p: dict, o
     assert "model.residual" not in src_plate, "Violation: build_plate_mms_sympy calls model.residual"
     assert "model.mass_form" not in src_plate, "Violation: build_plate_mms_sympy calls model.mass_form"
     assert "model.internal_work" not in src_plate, "Violation: build_plate_mms_sympy calls model.internal_work"
-    test_results["source_independence"] = {"status": "PASSED", "residual_calls_detected": 0}
+    test_results["source_independence"] = {"status": "PASS", "residual_calls_detected": 0,
+                                           "scope": "build_plate_mms_sympy source text only"}
     logger.info("  Source independence test: PASSED (zero production residual calls in source derivation)")
 
     # Test 4: RK3 stage count and low-storage coefficients
@@ -1073,7 +1232,9 @@ def run_automated_tests(solid: dict, fluid: dict, coupling: dict, mms_p: dict, o
     expected_coeffs = ((0.0, 1.0 / 3.0), (-5.0 / 9.0, 15.0 / 16.0), (-153.0 / 128.0, 8.0 / 15.0))
     assert len(expected_stage_times) == 3, "RK3 must evaluate exactly 3 stages"
     assert len(expected_coeffs) == 3, "RK3 must have 3 low-storage stage pairs"
-    test_results["rk3_stage_count"] = {"status": "PASSED", "num_stages": 3, "stage_times": list(expected_stage_times)}
+    test_results["rk3_stage_count"] = {"status": "PASS", "num_stages": 3,
+                                       "stage_times": list(expected_stage_times),
+                                       "scope": "local coefficient declaration; not dependency source audit"}
     logger.info("  RK3 stage count test: PASSED (3 stages, Williamson/FLOWVPM low-storage coefficients)")
 
     # Test 5: Virtual work duality
@@ -1107,18 +1268,49 @@ def run_automated_tests(solid: dict, fluid: dict, coupling: dict, mms_p: dict, o
             Wf, Ws, defect, work_rel = transfer.incremental_work_metrics(dq, p_forces, nodal)
             max_defect = max(max_defect, work_rel)
             assert work_rel < 1.0e-12, f"Work duality failure on {name}: {work_rel}"
-        test_results["work_duality"] = {"status": "PASSED", "max_relative_defect": max_defect}
+        test_results["work_duality"] = {"status": "PASS", "max_relative_defect": max_defect}
         logger.info("  Virtual work duality test: PASSED (max relative defect = %.3e)", max_defect)
     except Exception as exc:
-        logger.warning("  Work duality test skipped or failed: %s", exc)
-        test_results["work_duality"] = {"status": "SKIPPED", "reason": str(exc)}
+        logger.error("  Work duality test ERROR: %s", exc)
+        test_results["work_duality"] = {"status": "ERROR", "reason": str(exc)}
+
+    # These required checks are not implemented by this lightweight suite.
+    # Keep them visible and make an overall pass impossible until they are
+    # evaluated against the production operators and their complete histories.
+    for name, reason in {
+        "structural_jacobian_directional_derivative":
+            "No residual/Jacobian directional-derivative evaluation is implemented.",
+        "full_strong_to_weak_structural_identity":
+            "The current helper integrates only the transverse source and does not test boundary terms.",
+        "all_component_derivatives_and_boundary_data":
+            "The automated derivative check covers only w_t; the full target derivative/boundary audit is absent.",
+        "source_independence_dataflow":
+            "The current source-independence check inspects only build_plate_mms_sympy source text.",
+        "independent_transfer_traction_force_moment_work":
+            "Independent load approximation, common-origin moment, and full weighted work-conjugacy checks are incomplete.",
+    }.items():
+        test_results[name] = {"status": "NOT RUN", "reason": reason}
+
+    non_pass = {name: value for name, value in test_results.items()
+                if value["status"] != "PASS"}
+    overall = "PASS" if not non_pass else "FAIL"
+    test_results["overall"] = {
+        "status": overall,
+        "required_checks": len(test_results),
+        "non_pass_checks": sorted(non_pass),
+    }
 
     out_test = output_dir / "automated_tests.json"
     write_json(out_test, test_results)
     logger.info("Automated tests summary written to %s", out_test)
     print("\n" + "=" * 70)
-    print("AUTOMATED MMS CONSISTENCY TESTS: ALL PASSED")
+    print(f"AUTOMATED MMS CONSISTENCY TESTS: {overall}")
+    if non_pass:
+        for name, value in non_pass.items():
+            logger.error("  %s: %s — %s", name, value["status"], value.get("reason", ""))
     print("=" * 70 + "\n")
+    if overall != "PASS":
+        raise RuntimeError("Required MMS consistency checks are not all PASS; see automated_tests.json")
 
 
 # ---------------------------------------------------------------------------
