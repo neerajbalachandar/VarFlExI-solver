@@ -67,7 +67,11 @@ run_fluid() {
     "$JULIA_BIN" --project="$FLOWUNSTEADY_PROJECT" verification/mms/mms_rvpm.jl \
         --manifest "$manifest" \
         --output verification/mms/results/particles \
-        --study all
+        --study standalone
+    "$JULIA_BIN" --project="$FLOWUNSTEADY_PROJECT" verification/mms/mms_rvpm.jl \
+        --manifest "$manifest" \
+        --output verification/mms/results/particles \
+        --study refinement
 }
 
 run_coupled() {

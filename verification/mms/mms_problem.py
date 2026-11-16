@@ -1015,6 +1015,9 @@ def build_mms_manifest(solid: dict, fluid: dict, coupling: dict,
         "sweep": float(solid.get("leading_edge_sweep", 0.0)),
         "x_bound": x_bound,
         "freestream": freestream,
+        "moment_origin_m": np.asarray(
+            mms_params.get("coupled", {}).get("moment_origin_m", [0.0, 0.0, 0.0]), dtype=float
+        ).tolist(),
         "structural": {
             "components": components,
             "function_spaces": {
@@ -1029,8 +1032,8 @@ def build_mms_manifest(solid: dict, fluid: dict, coupling: dict,
         "particles": particles.to_dict(),
         "bound_circulation": bound_circ.to_dict(),
         "bound_circulation_status": (
-            "inactive in the coupled force path; the runtime target force comes "
-            "from the target-state production VLM branch"
+            "manufactured RHS is injected into the isolated target-geometry production VLM solve; "
+            "the coupled numerical wing circulation is recorded separately"
         ),
         "particle_formulas": {
             "position": "X0 + a*sin(omega_x*t) + b*(1-cos(omega_x*t))",
@@ -1094,6 +1097,7 @@ class CoupledMMSTarget:
     chord: float
     tip_chord: float
     freestream: dict
+    moment_origin_m: np.ndarray
     T: float = 0.0
 
     @property
@@ -1157,6 +1161,7 @@ class CoupledMMSTarget:
             chord=float(data["chord"]),
             tip_chord=float(data.get("tip_chord", data["chord"])),
             freestream=data["freestream"],
+            moment_origin_m=np.asarray(data.get("moment_origin_m", [0.0, 0.0, 0.0]), dtype=float),
             T=float(data.get("T", 0.0)),
         )
 
@@ -1203,7 +1208,7 @@ def _target_function(model, target: CoupledMMSTarget, t: float, order: int, spac
 class ReferenceForceFunctional:
     """Computes virtual work of aerodynamic target forces on the plate surface."""
 
-    def __init__(self, model, target: CoupledMMSTarget):
+    def __init__(self, model, target: CoupledMMSTarget, eta_cp: float = 0.75):
         self.model = model
         self.target = target
         fs = target.freestream
@@ -1211,6 +1216,9 @@ class ReferenceForceFunctional:
         self.omega = 2.3
         self.panel_forces = None
         self.panel_edges = np.linspace(0.0, float(target.structural.Ly), int(target.n_span) + 1)
+        self.eta_cp = float(eta_cp)
+        if not 0.0 < self.eta_cp < 1.0:
+            raise ValueError("eta_cp must lie strictly between the leading and trailing edges")
 
     def set_panel_forces(self, forces: np.ndarray):
         forces = np.asarray(forces, dtype=float).reshape(-1, 3)
@@ -1230,10 +1238,22 @@ class ReferenceForceFunctional:
                 def eval(self, values, x):
                     j = min(max(int(np.searchsorted(self.parent.panel_edges, x[1], side="right") - 1), 0),
                             len(self.parent.panel_forces) - 1)
-                    dy = self.parent.panel_edges[j + 1] - self.parent.panel_edges[j]
-                    eta = (j + 0.5) / len(self.parent.panel_forces)
-                    chord = self.parent.target.tip_chord * (1.0 - eta) + self.parent.target.chord * eta
-                    density = self.parent.panel_forces[j] / max(chord * dy, 1e-15)
+                    y0, y1 = self.parent.panel_edges[j:j+2]
+                    dy = y1 - y0
+                    eta_span = min(max(float(x[1]) / self.parent.target.structural.Ly, 0.0), 1.0)
+                    chord = (self.parent.target.chord * (1.0 - eta_span)
+                             + self.parent.target.tip_chord * eta_span)
+                    # A normalized beta traction has unit integral and mean
+                    # eta_cp, so each panel preserves its resultant and its
+                    # chordwise first moment at the production load point.
+                    concentration = 8.0
+                    alpha = self.parent.eta_cp * concentration
+                    beta = (1.0 - self.parent.eta_cp) * concentration
+                    x_le = float(self.parent.target.geometry.sweep) * eta_span
+                    xi = min(max((float(x[0]) - x_le) / max(chord, 1e-15), 1e-12), 1.0-1e-12)
+                    beta_norm = math.gamma(alpha) * math.gamma(beta) / math.gamma(alpha + beta)
+                    shape = xi**(alpha-1.0) * (1.0-xi)**(beta-1.0) / beta_norm
+                    density = self.parent.panel_forces[j] * shape / max(chord * dy, 1e-15)
                     values[0], values[1], values[2] = density
 
                 def value_shape(self):

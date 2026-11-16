@@ -435,8 +435,9 @@ class CouplingTransfer:
         return Wf, Ws, defect, relative_error
 
     @staticmethod
-    def wrench_transfer_metrics(aero_coords, aero_forces, solid_coords, nodal_forces, epsilon_reg=1.0e-16):
-        """Return net-force and net-moment transfer residuals about the origin."""
+    def wrench_transfer_metrics(aero_coords, aero_forces, solid_coords, nodal_forces,
+                                epsilon_reg=1.0e-16, moment_origin=(0.0, 0.0, 0.0)):
+        """Return force and moment residuals about a shared inertial origin."""
 
         def as_xyz(values, name):
             values = np.asarray(values, dtype=float)
@@ -460,6 +461,9 @@ class CouplingTransfer:
         aero_forces = as_vectors(aero_forces, "aero_forces")
         solid_coords = as_xyz(solid_coords, "solid_coords")
         nodal_forces = as_vectors(nodal_forces, "nodal_forces")
+        moment_origin = np.asarray(moment_origin, dtype=float)
+        if moment_origin.shape != (3,) or not np.isfinite(moment_origin).all():
+            raise ValueError("moment_origin must be a finite three-vector")
         if aero_coords.shape[0] != aero_forces.shape[0]:
             raise ValueError(
                 "Aerodynamic coordinate/force count mismatch: "
@@ -472,8 +476,8 @@ class CouplingTransfer:
             )
         force_fluid = np.sum(aero_forces, axis=0)
         force_solid = np.sum(nodal_forces, axis=0)
-        moment_fluid = np.sum(np.cross(aero_coords, aero_forces), axis=0)
-        moment_solid = np.sum(np.cross(solid_coords, nodal_forces), axis=0)
+        moment_fluid = np.sum(np.cross(aero_coords - moment_origin, aero_forces), axis=0)
+        moment_solid = np.sum(np.cross(solid_coords - moment_origin, nodal_forces), axis=0)
         force_residual = force_solid - force_fluid
         moment_residual = moment_solid - moment_fluid
         force_relative_error = float(np.linalg.norm(force_residual)) / max(

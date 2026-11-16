@@ -19,18 +19,29 @@ coupled verification studies. The configuration uses SI units.
   implementation changes. The coupled MMS requires `vpm_sfs=none` and
   `viscous_scheme=none`, because its independent particle source omits those
   effects; the driver rejects configurations that enable them.
-- The coupled runtime computes a target-state aerodynamic/VLM branch and
-  records its algebraic circulation residual. This is a consistency
-  diagnostic, not VLM MMS solution verification. `bound_circulation` in the
-  manifest is a prescribed, currently inactive target and must not be
-  interpreted as the circulation used to construct coupled target forces.
-- The structural history currently contains coefficient arrays and scalar
-  metadata, but not componentwise FE spatial norms. The coupled driver refuses
-  to label a coefficient-vector norm as an FE L2 error. It also requires
-  recorded common-origin moment and virtual-work metrics before writing a
-  coupled convergence row. Those producer fields are not yet available, so a
-  coupled run cannot produce a defensible convergence table until the history
-  schema is extended.
+- The coupled target aerodynamic branch is evaluated on a separate particle
+  field containing copied static particles and only the manifest's target
+  dynamic particles. Its configured `bound_circulation` enters an isolated
+  production VLM solve through a manufactured normal-velocity RHS correction.
+  The coupled numerical wing solve is still separate and is measured against
+  that target. The reference panel force is independently assembled from the
+  three Kutta–Joukowski bound segments and the two unsteady-circulation panel
+  triangles. MMS mode rejects parasitic polar drag and VLM regularization so
+  the independent force and horseshoe kernels match the declared production
+  terms.
+- The structural history now records componentwise FE spatial L2 errors using
+  domain integration. The coupled extractor additionally requires the active
+  bound-circulation target, production VLM residual, geometry error, and
+  separate force, moment, and work transfer metrics. The current producer
+  histories do not yet supply all of those quantities, so no coupled
+  convergence table is claimed.
+- The reference panel traction uses a normalized beta profile over each chord
+  with mean at configured `eta_cp`, preserving the intended panel resultant
+  and chordwise first moment under the affine swept-plate mapping.
+- The structural source is still the continuous manufactured weak-form load
+  evaluated at the force-exchange time. The history records generalized-α
+  inertia/internal evaluation times, but the source has not yet been
+  reconstructed from the exact discrete generalized-α residual.
 
 No numerical convergence values or pass claims are maintained in this README.
 Generated CSV/JSON records are the source of measured results. The driver
@@ -56,7 +67,8 @@ recorded in the fluid history. A particle-count refinement is a population
 and reconstruction study; source magnitude versus particle count alone is a
 source-scaling diagnostic, not solution convergence.
 
-Interface metrics are separate: `e_force`, `e_moment`, and `e_work`. Moment
+Interface metrics are separate: `e_transfer_force`, `e_transfer_moment`, and
+`e_transfer_work`. Moment
 comparisons must use the same declared origin and force sign convention; work
 comparisons must use the implemented weighted displacement/force inner
 products. Force conservation alone does not establish moment conservation or
@@ -70,7 +82,9 @@ levels are configured under `coupled` (`spatial_levels` and
 `temporal_levels`). Structural standalone spatial and temporal cases are
 listed under `standalone_plate`.
 
-The driver reads interface transfer levels, evaluation time, quadrature order,
+The fluid-only pipeline runs standalone source diagnostics and the particle
+refinement studies separately; it does not request coupled-result extraction
+without a result file. The driver reads interface transfer levels, evaluation time, quadrature order,
 particle time steps, and particle population levels from the manifest. Relative
 particle and probe errors use the matched analytical target norm as their
 normalization and reject a zero target. Explicit configured dimensional scales

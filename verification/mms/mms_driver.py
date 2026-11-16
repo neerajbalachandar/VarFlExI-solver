@@ -64,6 +64,7 @@ import math
 import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -859,10 +860,17 @@ def run_coupled(solid: dict, fluid: dict, coupling: dict, mms_p: dict,
         if res:
             coupled_results.append(res)
 
+    if len(coupled_results) != len(levels):
+        raise RuntimeError(
+            f"Only {len(coupled_results)} of {len(levels)} coupled levels produced measured results"
+        )
+
     if coupled_results:
         required = ("e_u0", "e_v0", "e_w", "e_theta_x", "e_theta_y",
                     "e_pos", "e_circ", "e_core", "e_velocity", "e_vorticity",
-                    "e_force", "e_moment", "e_work")
+                    "e_gamma_bound", "e_aero_force", "vlm_algebraic_residual",
+                    "e_geometry_cp", "e_transfer_force", "e_transfer_moment",
+                    "e_transfer_work")
         for result in coupled_results:
             missing = [key for key in required if key not in result or
                        not math.isfinite(float(result[key]))]
@@ -871,15 +879,29 @@ def run_coupled(solid: dict, fluid: dict, coupling: dict, mms_p: dict,
                     f"Coupled level {result.get('level')} has no complete measured result; "
                     f"missing/non-finite metrics: {', '.join(missing)}"
                 )
-        hdr = ["level", "dt_f", "dt_s", "nx", "ny", "n_span", *required]
+        hdr = ["study", "level", "step", "final_time_s", "dt_f", "dt_s",
+               "nx", "ny", "n_span", "moment_origin_m", "force_transfer_mode",
+               "displacement_transfer_mode", *required]
         rows = []
         for r in coupled_results:
             rows.append([
-                r["level"], r["dt_f"], r["dt_s"], r["nx"], r["ny"], r["n_span"],
+                r["study"], r["level"], r["step"], r["final_time_s"],
+                r["dt_f"], r["dt_s"], r["nx"], r["ny"], r["n_span"],
+                json.dumps(r["moment_origin_m"]), r["force_transfer_mode"],
+                r["displacement_transfer_mode"],
                 *(r[key] for key in required),
             ])
-        write_csv(out_coupled / "coupled_convergence.csv", hdr, rows)
-        print_table("Coupled FSI MMS Convergence", hdr, rows)
+        suitable_sequence = len(coupled_results) >= 3 and all(
+            all(float(left[key]) > float(right[key]) for left, right in zip(coupled_results, coupled_results[1:]))
+            for key in required
+        )
+        if suitable_sequence:
+            write_csv(out_coupled / "coupled_convergence.csv", hdr, rows)
+            print_table("Coupled FSI MMS Convergence", hdr, rows)
+        else:
+            write_csv(out_coupled / "coupled_metrics.csv", hdr, rows)
+            logger.warning("Wrote measured coupled metrics; the levels do not provide three strictly "
+                           "decreasing measurements for every required metric")
 
 
 def _execute_coupled_case(manifest_path: Path, output_dir: Path,
@@ -890,11 +912,17 @@ def _execute_coupled_case(manifest_path: Path, output_dir: Path,
         raise ValueError("The coupled particle MMS requires vpm_sfs=none; its independent source omits SFS terms")
     if str(fluid.get("viscous_scheme", "none")).strip().lower() not in ("none", "off", "false"):
         raise ValueError("The coupled particle MMS requires viscous_scheme=none; its source omits viscous diffusion")
+    if str(fluid.get("section_polar", "")).strip():
+        raise ValueError("The independent coupled MMS force excludes parasitic airfoil-polar drag; clear section_polar")
+    if bool(fluid.get("regularize_vlm", False)):
+        raise ValueError("The independent coupled MMS horseshoe kernel is unregularized; disable regularize_vlm")
     mesh_level = (int(mms_p["coupled"].get("temporal_mesh_level", 4))
                   if study == "temporal" else level)
     base_nx = int(mms_p["coupled"]["base_nx"]) * mesh_level
     base_ny = int(mms_p["coupled"]["base_ny"]) * mesh_level
-    base_dt = float(mms_p["coupled"]["base_dt"]) / level
+    base_dt = float(mms_p["coupled"]["base_dt"])
+    if study == "temporal":
+        base_dt /= level
     duration = float(mms_p["coupled"]["base_duration"])
     n_span = int(mms_p["coupled"]["base_n_span"]) * mesh_level
     steps = max(1, int(round(duration / base_dt)))
@@ -907,12 +935,21 @@ def _execute_coupled_case(manifest_path: Path, output_dir: Path,
         port = s.getsockname()[1]
 
     # Write case configuration YAMLs
-    f_cfg = dict(fluid, n_span=n_span, save_directory=str(output_dir / "fluid"),
+    actual_dt = duration / steps
+    f_cfg = dict(fluid, n_span=n_span, dt=actual_dt, ttot=duration, nsteps=steps,
+                 save_directory=str(output_dir / "fluid"),
                  run_name="coupled_mms", prompt=False, save_every=1)
     s_cfg = dict(solid, nx=base_nx, ny=base_ny, output_dir=str(output_dir / "solid"),
                  force_ramp_iters=1)
     c_cfg = dict(coupling, n_steps=steps, total_time=duration, port=port,
                  comm_nspan=n_span, results_root=str(output_dir / "coupling"))
+
+    # A level owns fresh outputs; stale histories cannot satisfy this run.
+    for subdir in ("fluid", "solid", "coupling"):
+        path = output_dir / subdir
+        if path.exists():
+            shutil.rmtree(path)
+        path.mkdir(parents=True, exist_ok=True)
 
     for name, data in (("fluid_params.yaml", f_cfg), ("solid_params.yaml", s_cfg), ("coupling_params.yaml", c_cfg)):
         with open(configs_dir / name, "w", encoding="utf-8") as fh:
@@ -932,14 +969,32 @@ def _execute_coupled_case(manifest_path: Path, output_dir: Path,
             # 1. Coupler broker
             cmd_c = [sys.executable, str(_REPO_ROOT / "coupling/varflexi.py"), "--config_path", str(configs_dir)]
             procs.append(subprocess.Popen(cmd_c, cwd=_REPO_ROOT, env=env, stdout=log_fh, stderr=subprocess.STDOUT))
-            time.sleep(0.3)
+            startup_deadline = time.monotonic() + 30.0
+            while time.monotonic() < startup_deadline:
+                if procs[0].poll() is not None:
+                    raise RuntimeError(f"coupler exited during startup with code {procs[0].returncode}")
+                if log_file.exists() and "Waiting for fluid and solid role handshakes" in log_file.read_text(
+                        encoding="utf-8", errors="replace"):
+                    break
+                time.sleep(0.05)
+            else:
+                raise TimeoutError("coupler did not report readiness within 30 seconds")
 
             # 2. Solid solver
             cmd_s = [sys.executable, str(_REPO_ROOT / "solid/structural_solver.py"),
                      "--config_path", str(configs_dir), "--mms-target", str(manifest_path.resolve()),
                      "--mms-output", str(output_dir / "solid")]
             procs.append(subprocess.Popen(cmd_s, cwd=_REPO_ROOT, env=env, stdout=log_fh, stderr=subprocess.STDOUT))
-            time.sleep(0.3)
+            solid_deadline = time.monotonic() + 30.0
+            while time.monotonic() < solid_deadline:
+                if procs[1].poll() is not None:
+                    raise RuntimeError(f"solid solver exited during startup with code {procs[1].returncode}")
+                if log_file.exists() and "Solid connected" in log_file.read_text(
+                        encoding="utf-8", errors="replace"):
+                    break
+                time.sleep(0.05)
+            else:
+                raise TimeoutError("solid solver did not complete its broker handshake within 30 seconds")
 
             # 3. Fluid solver (Julia)
             julia_bin = os.environ.get("JULIA_BIN", "julia")
@@ -952,27 +1007,38 @@ def _execute_coupled_case(manifest_path: Path, output_dir: Path,
                      "--mms-output", str(output_dir / "fluid")]
             procs.append(subprocess.Popen(cmd_f, cwd=_REPO_ROOT, env=env, stdout=log_fh, stderr=subprocess.STDOUT))
 
-            deadline = time.monotonic() + 300
+            deadline = time.monotonic() + float(mms_p.get("coupled", {}).get("process_timeout_s", 300.0))
             while any(p.poll() is None for p in procs) and time.monotonic() < deadline:
                 if any(p.poll() not in (None, 0) for p in procs):
                     break
-                time.sleep(0.5)
+                time.sleep(0.1)
 
+            timed_out = any(p.poll() is None for p in procs)
             for p in procs:
                 if p.poll() is None:
                     p.terminate()
+            for p in procs:
+                if p.poll() is None:
+                    try:
+                        p.wait(timeout=5.0)
+                    except subprocess.TimeoutExpired:
+                        p.kill()
+                        p.wait()
 
         codes = [p.poll() for p in procs]
+        if timed_out:
+            raise TimeoutError(f"coupled processes exceeded timeout; see {log_file}")
         if any(c != 0 for c in codes):
             raise RuntimeError(f"coupled processes exited with codes {codes}; see {log_file}")
 
         # Read actual output histories. A successful process exit is not a
         # verification result; metrics must come from matched recorded data.
-        return _extract_coupled_metrics(
+        result = _extract_coupled_metrics(
             output_dir, level, base_nx, base_ny, n_span, mms_p,
             str(s_cfg.get("diag_csv_filename", "solid_v18_diagnostics.csv")),
-            duration / steps,
+            duration / steps, study,
         )
+        return result
     except Exception as exc:
         for p in procs:
             if p.poll() is None:
@@ -1017,7 +1083,7 @@ def _relative_array_error(numerical, target, *, label: str) -> float:
 def _extract_coupled_metrics(output_dir: Path, level: int,
                              nx: int, ny: int, n_span: int,
                              mms_p: dict, diagnostics_name: str,
-                             dt_s: float) -> dict:
+                             dt_s: float, study: str = "spatial") -> dict:
     """Extract only measured, time-matched quantities from coupled histories.
 
     The current structural history contains coefficient vectors but no FE mass
@@ -1032,6 +1098,7 @@ def _extract_coupled_metrics(output_dir: Path, level: int,
         "fixed_probe_positions_m", "target_probe_velocity_m_s",
         "numerical_probe_velocity_m_s", "target_probe_vorticity_s_inv",
         "numerical_probe_vorticity_s_inv", "target_force", "force",
+        "bound_circulation", "target_bound_circulation",
         "rVPM_RK3_stage_times_s", "target_geometry", "geometry_cp_absolute",
     ))
     solid_path = solid_dir / "solid_mms_history.csv"
@@ -1047,6 +1114,21 @@ def _extract_coupled_metrics(output_dir: Path, level: int,
     if missing:
         raise ValueError(f"Structural MMS history is missing fields: {', '.join(missing)}")
 
+    if len(rows) != len(fluid_records):
+        raise ValueError(
+            f"Fluid/solid force histories have different lengths ({len(fluid_records)} vs {len(rows)})"
+        )
+    solid_steps = [int(row["step"]) for row in rows]
+    fluid_steps = [int(rec.get("step", -1)) for rec in fluid_records]
+    if solid_steps != fluid_steps or solid_steps != list(range(1, len(rows) + 1)):
+        raise ValueError("Fluid and structural histories must contain identical ordered step IDs")
+    solid_times = np.asarray([float(row["time_s"]) for row in rows], dtype=float)
+    fluid_times_all = np.asarray([float(rec["fluid_time_s"]) for rec in fluid_records], dtype=float)
+    tolerance = float(mms_p.get("coupled", {}).get("time_match_tolerance_s", 1.0e-10))
+    if not np.isfinite(solid_times).all() or not np.isfinite(fluid_times_all).all() or not np.allclose(
+            solid_times, fluid_times_all, rtol=0.0, atol=tolerance):
+        raise ValueError("Fluid and structural histories do not share the same physical evaluation times")
+
     final_solid = rows[-1]
     t_s = float(final_solid["time_s"])
     if not math.isfinite(t_s):
@@ -1060,7 +1142,10 @@ def _extract_coupled_metrics(output_dir: Path, level: int,
         force_history = np.asarray(json.loads(final_solid[field]), dtype=float)
         if force_history.size == 0 or not np.isfinite(force_history).all():
             raise ValueError(f"Structural {field} is empty or non-finite")
-    tolerance = float(mms_p.get("coupled", {}).get("time_match_tolerance_s", 1.0e-10))
+    fluid_times = [float(rec["fluid_time_s"]) for rec in fluid_records]
+    if not all(math.isfinite(t) for t in fluid_times) or any(
+            right <= left for left, right in zip(fluid_times, fluid_times[1:])):
+        raise ValueError("Fluid force-exchange times must be finite, unique, and strictly increasing")
     matches = [rec for rec in fluid_records
                if abs(float(rec["fluid_time_s"]) - t_s) <= tolerance]
     if len(matches) != 1:
@@ -1078,12 +1163,26 @@ def _extract_coupled_metrics(output_dir: Path, level: int,
         raise ValueError("Recorded fluid time increment must be finite and positive")
     expected_stage_times = t_s - dt_f_recorded + dt_f_recorded * np.asarray((0.0, 1.0 / 3.0, 3.0 / 4.0))
     if not np.allclose(stage_times, expected_stage_times, rtol=0.0,
-                       atol=max(tolerance, abs(dt_f) * 1.0e-12)):
+                       atol=max(tolerance, abs(dt_f_recorded) * 1.0e-12)):
         raise ValueError(
             f"Recorded fluid RK3 stages {stage_times.tolist()} do not match expected "
             f"stage chronology {expected_stage_times.tolist()} ending at force time {t_s:g} s"
         )
+    for record in fluid_records:
+        record_time = float(record["fluid_time_s"])
+        record_dt = float(record["dt"])
+        record_stages = np.asarray(record["rVPM_RK3_stage_times_s"], dtype=float)
+        expected = record_time - record_dt + record_dt * np.asarray((0.0, 1.0/3.0, 3.0/4.0))
+        if (record_stages.shape != (3,) or not np.isfinite(record_stages).all()
+                or not math.isfinite(record_dt) or record_dt <= 0.0
+                or not np.allclose(record_stages, expected, rtol=0.0,
+                                   atol=max(tolerance, abs(record_dt)*1.0e-12))):
+            raise ValueError(f"Fluid RK3 stage chronology is invalid at step {record.get('step')}")
 
+    target_ids = fluid.get("target_particle_ids")
+    numerical_ids = fluid.get("numerical_particle_ids")
+    if target_ids is None or numerical_ids is None or target_ids != numerical_ids:
+        raise ValueError("Fluid target/numerical particle IDs are missing or out of exact order")
     p_target, p_num = fluid["target_particle_state"], fluid["numerical_particle_state"]
     particle_metrics = {
         "e_pos": _relative_array_error(p_num["position"], p_target["position"], label="e_pos"),
@@ -1103,9 +1202,6 @@ def _extract_coupled_metrics(output_dir: Path, level: int,
     origin = np.asarray(mms_p["coupled"]["moment_origin_m"], dtype=float)
     if origin.shape != (3,) or not np.isfinite(origin).all():
         raise ValueError("coupled.moment_origin_m must be a finite three-vector")
-    if not np.array_equal(origin, np.zeros(3)):
-        raise ValueError("The current production transfer diagnostics compute moments about [0, 0, 0] m")
-
     diagnostics_path = solid_dir / diagnostics_name
     if not diagnostics_path.is_file():
         raise FileNotFoundError(f"Required structural transfer diagnostics are missing: {diagnostics_path}")
@@ -1113,8 +1209,10 @@ def _extract_coupled_metrics(output_dir: Path, level: int,
         diag_reader = csv.DictReader(stream)
         diag_rows = list(diag_reader)
         diag_fields = diag_reader.fieldnames or ()
-    diag_keys = ("time", "force_transfer_relative_error", "moment_transfer_relative_error",
-                 "incremental_work_relative_error")
+    diag_keys = ("step", "time", "force_transfer_relative_error", "moment_transfer_relative_error",
+                 "incremental_work_relative_error", "force_transfer_mode",
+                 "displacement_transfer_mode", "moment_origin_x_m", "moment_origin_y_m",
+                 "moment_origin_z_m")
     missing_diag = [key for key in diag_keys if key not in diag_fields]
     if missing_diag or not diag_rows:
         raise ValueError(f"Transfer diagnostics missing fields/rows: {missing_diag or 'empty history'}")
@@ -1123,10 +1221,15 @@ def _extract_coupled_metrics(output_dir: Path, level: int,
     if len(diag_matches) != 1:
         raise ValueError(f"Expected one transfer diagnostic at t={t_s:g} s, found {len(diag_matches)}")
     diag = diag_matches[0]
+    if int(diag["step"]) != int(final_solid["step"]):
+        raise ValueError("Transfer diagnostic step does not match the final fluid/solid step")
+    recorded_origin = np.asarray([float(diag[f"moment_origin_{axis}_m"]) for axis in "xyz"])
+    if not np.isfinite(recorded_origin).all() or not np.array_equal(recorded_origin, origin):
+        raise ValueError("Transfer diagnostic moment origin does not match the configured common origin")
     interface_metrics = {
-        "e_force": float(diag["force_transfer_relative_error"]),
-        "e_moment": float(diag["moment_transfer_relative_error"]),
-        "e_work": float(diag["incremental_work_relative_error"]),
+        "e_transfer_force": float(diag["force_transfer_relative_error"]),
+        "e_transfer_moment": float(diag["moment_transfer_relative_error"]),
+        "e_transfer_work": float(diag["incremental_work_relative_error"]),
     }
     if any(not math.isfinite(value) or value < 0.0 for value in interface_metrics.values()):
         raise ValueError(f"Transfer diagnostics contain invalid metrics: {interface_metrics}")
@@ -1141,8 +1244,22 @@ def _extract_coupled_metrics(output_dir: Path, level: int,
     structural_metrics = {key: float(final_solid[key]) for key in structural_metric_keys}
     if not all(math.isfinite(value) for value in structural_metrics.values()):
         raise ValueError("Structural FE spatial L2 history contains a non-finite metric")
+    gamma_metrics = {
+        "e_gamma_bound": _relative_array_error(
+            fluid["bound_circulation"], fluid["target_bound_circulation"], label="e_gamma_bound"),
+        "e_aero_force": _relative_array_error(fluid["force"], fluid["target_force"], label="e_aero_force"),
+        "e_geometry_cp": _relative_array_error(
+            fluid["geometry_cp_absolute"], fluid["target_geometry"]["cp"], label="e_geometry_cp"),
+    }
+    if "vlm_algebraic_residual" not in fluid:
+        raise ValueError("Fluid history is missing the production VLM algebraic residual")
+    gamma_metrics["vlm_algebraic_residual"] = float(fluid["vlm_algebraic_residual"])
+    if not math.isfinite(gamma_metrics["vlm_algebraic_residual"]) or gamma_metrics["vlm_algebraic_residual"] < 0:
+        raise ValueError("Production VLM algebraic residual must be finite and nonnegative")
     return {
+        "study": study,
         "level": level,
+        "step": int(fluid.get("step", len(fluid_records))),
         "dt_f": dt_f_recorded,
         "dt_s": float(dt_s),
         "nx": nx,
@@ -1151,9 +1268,12 @@ def _extract_coupled_metrics(output_dir: Path, level: int,
         **structural_metrics,
         **particle_metrics,
         **interface_metrics,
+        **gamma_metrics,
         "final_time_s": t_s,
         "fluid_stage_times_s": stage_times.tolist(),
         "moment_origin_m": origin.tolist(),
+        "force_transfer_mode": diag.get("force_transfer_mode", "unknown"),
+        "displacement_transfer_mode": diag.get("displacement_transfer_mode", "unknown"),
         "norm_time_kind": "final-time at the matched fluid force-exchange/structural time",
     }
 

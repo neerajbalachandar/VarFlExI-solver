@@ -121,6 +121,20 @@ function particle_derivatives(target::CoupledMMSTarget, t)
     return Xt, Gt, st
 end
 
+function bound_circulation_state(target::CoupledMMSTarget, t, n_span::Int)
+    haskey(target.data, "bound_circulation") || error("MMS manifest is missing bound_circulation")
+    bc = target.data["bound_circulation"]
+    omega = Float64(bc["omega"])
+    gamma0 = Float64.(bc["gamma0"])
+    a = Float64.(bc["a"])
+    b = Float64.(bc["b"])
+    length(gamma0) == length(a) == length(b) == n_span || error(
+        "bound-circulation target arrays must match the production spanwise station count")
+    isfinite(omega) && all(isfinite, gamma0) && all(isfinite, a) && all(isfinite, b) ||
+        error("bound-circulation target must be finite")
+    return gamma0 .+ a .* sin(omega * Float64(t)) .+ b .* cos(omega * Float64(t))
+end
+
 function seed_coupled_mms_particles!(target::CoupledMMSTarget, pfield)
     """Install only the prescribed startup initial data before RK stage one.
 
@@ -167,10 +181,36 @@ function independent_biot_savart_velocity(x_target, X, Gamma, sigma)
     return u
 end
 
+function independent_finite_vortex_segment(A, B, C, Gamma)
+    """Unregularized finite-segment Biot–Savart velocity, independent of FLOWVLM."""
+    r0 = B .- A
+    r1 = C .- A
+    r2 = C .- B
+    cr = cross(r1, r2)
+    cr2 = dot(cr, cr)
+    r0n = norm(r0)
+    r1n, r2n = norm(r1), norm(r2)
+    if cr2 <= eps(Float64) || r0n <= eps(Float64) || r1n <= eps(Float64) || r2n <= eps(Float64)
+        return zeros(Float64, 3)
+    end
+    return (Float64(Gamma) / (4.0 * pi)) .* cr .* dot(r0, r1 ./ r1n .- r2 ./ r2n) ./ cr2
+end
+
 function independent_rhs_at_target(target::CoupledMMSTarget, X, Gamma, sigma, Uinf; f_rvpm=0.5, g_rvpm=1.25)
+    ndims(X) == 2 && size(X, 2) == 3 || error("MMS particle positions must have shape (n, 3)")
     n = size(X, 1)
+    size(Gamma) == (n, 3) || error("MMS particle circulation must have shape (n, 3)")
+    length(sigma) == n || error("MMS particle core radii must have length n")
+    length(Uinf) == 3 || error("MMS freestream velocity must have length 3")
+    length(target.ids) == n || error("MMS target ID count does not match particle state")
+    all(isfinite, X) && all(isfinite, Gamma) && all(isfinite, sigma) && all(isfinite, Uinf) ||
+        error("MMS particle source inputs must be finite")
+    all(sigma .> 0.0) || error("MMS particle core radii must be positive")
+    isfinite(f_rvpm) && isfinite(g_rvpm) && 1.0 + 3.0 * f_rvpm != 0.0 ||
+        error("MMS rVPM stretching normalization is invalid")
     rhsX = zeros(Float64, n, 3)
     rhsG = zeros(Float64, n, 3)
+    rhsS = zeros(Float64, n)
     h_fd = 1.0e-5
     for i in 1:n
         xtgt = [X[i, 1], X[i, 2], X[i, 3]]
@@ -190,10 +230,9 @@ function independent_rhs_at_target(target::CoupledMMSTarget, X, Gamma, sigma, Ui
         gi = [Gamma[i, 1], Gamma[i, 2], Gamma[i, 3]]
         S = J' * gi
         G2 = gi[1]^2 + gi[2]^2 + gi[3]^2
-        Z = 0.0
-        if G2 > 0.0
-            Z = (f_rvpm + g_rvpm) / (1.0 + 3.0 * f_rvpm) * dot(S, gi) / G2
-        end
+        isfinite(G2) && G2 > eps(Float64) || error(
+            "MMS circulation normalization is singular for particle ID $(target.ids[i])")
+        Z = (f_rvpm + g_rvpm) / (1.0 + 3.0 * f_rvpm) * dot(S, gi) / G2
         rhsG[i, :] .= S .- 3.0 .* Z .* gi
         # Stretching-induced core evolution rate in rVPM: dsigma/dt = -sigma * Z
         # Retained to ensure the native stretching-induced core evolution is

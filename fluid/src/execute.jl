@@ -22,7 +22,7 @@ uns.run_simulation(simulation, nsteps;
     vpm_surface=true,
     shed_starting=mms_target_enabled ? false : shed_starting,
     shed_unsteady=mms_target_enabled ? false : use_unsteady_shedding,
-    shed_boundarylayer=solver_cfg.shed_boundarylayer,
+    shed_boundarylayer=mms_target_enabled ? false : solver_cfg.shed_boundarylayer,
     boundarylayer_prescribedCd=solver_cfg.boundarylayer_prescribed_cd,
     boundarylayer_d=solver_cfg.boundarylayer_dipole_width,
     unsteady_shedcrit=unsteady_shedcrit,

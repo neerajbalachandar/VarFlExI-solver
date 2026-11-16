@@ -11,6 +11,7 @@ from dolfin import *
 import argparse
 import csv
 import json
+import math
 import os
 import socket
 
@@ -88,6 +89,7 @@ class StructuralSolver:
         self.mms_target_path = mms_target_path
         self.mms_output = mms_output
         self.mms_target = None
+        self.moment_origin_m = np.zeros(3, dtype=float)
         # The residual assembly is shared by ordinary and MMS solves; keep
         # the optional source unset for normal runs as well as MMS runs.
         self.mms_rhs_source = None
@@ -103,7 +105,12 @@ class StructuralSolver:
         if self.mms_target_path:
             with open(self.mms_target_path, encoding="utf-8") as stream:
                 self.mms_target = PythonMMSTarget.from_manifest(json.load(stream))
-            self.reference_force = ReferenceForceFunctional(self.model, self.mms_target)
+            self.moment_origin_m = np.asarray(self.mms_target.moment_origin_m, dtype=float)
+            if self.moment_origin_m.shape != (3,) or not np.isfinite(self.moment_origin_m).all():
+                raise ValueError("MMS moment_origin_m must be a finite three-vector")
+            self.reference_force = ReferenceForceFunctional(
+                self.model, self.mms_target, eta_cp=self.eta_cp
+            )
             self.mms_spaces = [self.model.V.sub(i).collapse() for i in range(3)]
             # The numerical solve starts from the target's declared initial
             # data. For the current ramp target q(0)=q_t(0)=0 while q_tt(0)
@@ -121,7 +128,9 @@ class StructuralSolver:
             self.mms_history_writer = csv.writer(self.mms_history)
             self.mms_history_writer.writerow((
                 "step", "time_s", "target_force", "numerical_force", "target_state",
-                "numerical_state", "state_error_l2", "source_l2",
+                "numerical_state", "state_error_l2_coefficient_diagnostic", "source_l2",
+                "e_u0", "e_v0", "e_w", "e_theta_x", "e_theta_y",
+                "source_evaluation_time_s", "t_alpha_m_s", "t_alpha_f_s",
             ))
 
     def _setup_simulation_data(self):
@@ -710,6 +719,19 @@ class StructuralSolver:
                 target_force = np.asarray(data["target_force"], dtype=float)
                 self.reference_force.set_panel_forces(target_force)
                 physical_time = float(data.get("fluid_time_s", (i_step + 1) * self.dt_value))
+                expected_time = float(self.time[i_step + 1])
+                clock_tolerance = float(cfg_get(
+                    self.coupling_config, "time_match_tolerance_s", default=1.0e-10
+                ))
+                if int(data.get("step", -1)) != i_step + 1:
+                    raise RuntimeError(
+                        f"MMS fluid/solid step mismatch: fluid={data.get('step')}, solid={i_step + 1}"
+                    )
+                if not math.isfinite(physical_time) or abs(physical_time - expected_time) > clock_tolerance:
+                    raise RuntimeError(
+                        f"MMS fluid/solid force clocks differ: fluid={physical_time:.16g} s, "
+                        f"solid={expected_time:.16g} s, tolerance={clock_tolerance:g} s"
+                    )
                 self.mms_rhs_source = add_coupled_mms_source(
                     self.model, self.mms_target, physical_time, self.reference_force,
                     self.mms_spaces,
@@ -776,6 +798,37 @@ class StructuralSolver:
                 )
                 tgt_state = tgt_func.vector().get_local()
                 srcnorm = self.mms_rhs_source.norm("l2") if self.mms_rhs_source is not None else 0.0
+                from dolfin import assemble
+                num_groups = self.model.q.split(deepcopy=True)
+                tgt_groups = tgt_func.split(deepcopy=True)
+                # The mixed FE ordering is (u0,v0), w, (theta_x,theta_y).
+                num_components = (num_groups[0].sub(0, deepcopy=True),
+                                  num_groups[0].sub(1, deepcopy=True),
+                                  num_groups[1],
+                                  num_groups[2].sub(0, deepcopy=True),
+                                  num_groups[2].sub(1, deepcopy=True))
+                tgt_components = (tgt_groups[0].sub(0, deepcopy=True),
+                                  tgt_groups[0].sub(1, deepcopy=True),
+                                  tgt_groups[1],
+                                  tgt_groups[2].sub(0, deepcopy=True),
+                                  tgt_groups[2].sub(1, deepcopy=True))
+                component_names = ("u", "v", "w", "theta_x", "theta_y")
+                amplitudes = self.mms_target.structural.components
+                component_errors = []
+                for name, num_component, target_component in zip(
+                        component_names, num_components, tgt_components):
+                    difference_sq = float(assemble((num_component-target_component)**2 * self.model.dx))
+                    target_sq = float(assemble(target_component**2 * self.model.dx))
+                    # Component-specific scales have the units of the field:
+                    # translations use metres and rotations use radians.
+                    floor = abs(float(amplitudes[name]["amplitude"])) * math.sqrt(
+                        float(self.mms_target.structural.Lx * self.mms_target.structural.Ly)
+                    )
+                    norm_target = math.sqrt(max(target_sq, 0.0))
+                    scale = norm_target if norm_target > 0.0 else floor
+                    if not math.isfinite(scale) or scale <= 0.0:
+                        raise RuntimeError(f"MMS FE normalization scale for {name} is not positive")
+                    component_errors.append(math.sqrt(max(difference_sq, 0.0)) / scale)
                 self.mms_history_writer.writerow((
                     i_step + 1,
                     f"{physical_time:.16e}",
@@ -785,6 +838,10 @@ class StructuralSolver:
                     json.dumps(num_state.tolist()),
                     f"{np.linalg.norm(num_state-tgt_state):.16e}",
                     f"{srcnorm:.16e}",
+                    *(f"{value:.16e}" for value in component_errors),
+                    f"{physical_time:.16e}",
+                    f"{physical_time - float(self.model.integrator.alpha_m) * self.dt_value:.16e}",
+                    f"{physical_time - float(self.model.integrator.alpha_f) * self.dt_value:.16e}",
                 ))
                 self.mms_history.flush()
             solid_solve_time = perf_counter() - solid_solve_start
@@ -810,6 +867,7 @@ class StructuralSolver:
                     forces_eff,
                     nodal_forces,
                     epsilon_reg=self.epsilon_reg,
+                    moment_origin=self.moment_origin_m,
                 )
                 self.incremental_work_Wf[i_step] = Wf
                 self.incremental_work_Ws[i_step] = Ws
@@ -1104,7 +1162,8 @@ class StructuralSolver:
                 "geometry_residual,geometry_reference_norm,geometry_relative_error,geometry_transfer_apply_time,"
                 "surface_strain_percent,strain_increase_percentage_points,"
                 "solid_solve_time,solid_io_time,step_walltime,surface_strain_max,membrane_stress_max_N_per_m,"
-                "newton_iterations,newton_residual_norm,newton_relative_residual,newton_load_stages\n"
+                "newton_iterations,newton_residual_norm,newton_relative_residual,newton_load_stages,"
+                "force_transfer_mode,displacement_transfer_mode,moment_origin_x_m,moment_origin_y_m,moment_origin_z_m\n"
             )
             for k_idx in range(self.Nsteps):
                 fp.write(
@@ -1144,7 +1203,10 @@ class StructuralSolver:
                     f"{self.newton_iterations[k_idx]},"
                     f"{self.newton_residual_norm[k_idx]:.12e},"
                     f"{self.newton_relative_residual[k_idx]:.12e},"
-                    f"{self.newton_load_stages[k_idx]}\n"
+                    f"{self.newton_load_stages[k_idx]},"
+                    f"{self.force_transfer_mode},{self.displacement_transfer_mode},"
+                    f"{self.moment_origin_m[0]:.12e},{self.moment_origin_m[1]:.12e},"
+                    f"{self.moment_origin_m[2]:.12e}\n"
                 )
 
 
