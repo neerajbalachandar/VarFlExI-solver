@@ -879,28 +879,51 @@ class ErrorNorms:
 class BoundCirculationTarget:
     """Analytical spanwise bound-circulation target at VLM stations.
 
-    Γ_bound_i*(t) = Γ0_i + a_i sin(ω t) + b_i (1 − cos(ω t))
+    Γ_bound_i*(t) = Γ0_i + a_i sin(ω t) + b_i cos(ω t)
 
-    This is NOT forced into the production VLM system (which solves a
-    no-penetration problem).  It is used only to prescribe the target
-    Kutta–Joukowski panel forces.
+    It is imposed only in the isolated manufactured target VLM solve. The
+    main production VLM solve remains independently measured against it; the
+    target is also used for the reference Kutta–Joukowski panel forces.
     """
     gamma0: np.ndarray
     a: np.ndarray
     b: np.ndarray
     omega: float
 
+    def __post_init__(self):
+        arrays = [np.asarray(value, dtype=float) for value in (self.gamma0, self.a, self.b)]
+        if any(value.ndim != 1 for value in arrays):
+            raise ValueError("bound-circulation gamma0, a and b must be one-dimensional station arrays")
+        if not arrays[0].size or any(value.shape != arrays[0].shape for value in arrays[1:]):
+            raise ValueError("bound-circulation gamma0, a and b must have the same nonzero station count")
+        if not all(np.isfinite(value).all() for value in arrays) or not math.isfinite(float(self.omega)):
+            raise ValueError("bound-circulation target coefficients and frequency must be finite")
+        if float(self.omega) <= 0.0:
+            raise ValueError("bound-circulation target frequency must be positive")
+        object.__setattr__(self, "gamma0", arrays[0])
+        object.__setattr__(self, "a", arrays[1])
+        object.__setattr__(self, "b", arrays[2])
+
     def state(self, t: float) -> np.ndarray:
+        if not math.isfinite(float(t)):
+            raise ValueError("bound-circulation evaluation time must be finite")
         phase = float(self.omega) * float(t)
-        return (np.asarray(self.gamma0)
-                + np.asarray(self.a) * math.sin(phase)
-                + np.asarray(self.b) * (1.0 - math.cos(phase)))
+        return self.gamma0 + self.a * math.sin(phase) + self.b * math.cos(phase)
+
+    def derivative(self, t: float) -> np.ndarray:
+        """Analytic time derivative of the canonical circulation target."""
+        if not math.isfinite(float(t)):
+            raise ValueError("bound-circulation evaluation time must be finite")
+        phase = float(self.omega) * float(t)
+        return float(self.omega) * (self.a * math.cos(phase) - self.b * math.sin(phase))
 
     def to_dict(self) -> dict:
         return {"gamma0": np.asarray(self.gamma0).tolist(),
                 "a": np.asarray(self.a).tolist(),
                 "b": np.asarray(self.b).tolist(),
-                "omega": float(self.omega)}
+                "omega": float(self.omega),
+                "formula": "gamma0 + a*sin(omega*t) + b*cos(omega*t)",
+                "derivative": "omega*(a*cos(omega*t) - b*sin(omega*t))"}
 
 
 # ---------------------------------------------------------------------------
@@ -980,6 +1003,11 @@ def build_mms_manifest(solid: dict, fluid: dict, coupling: dict,
         b=np.full(n_span, float(mms_params["bound_circulation"]["b"])),
         omega=omega_bc,
     )
+    moment_origin = np.asarray(
+        mms_params.get("coupled", {}).get("moment_origin_m", [0.0, 0.0, 0.0]), dtype=float
+    )
+    if moment_origin.shape != (3,) or not np.isfinite(moment_origin).all():
+        raise ValueError("coupled.moment_origin_m must be a finite length-three vector")
 
     freestream = {
         "vinf": float(fluid.get("vinf", 15.0)),
@@ -1015,9 +1043,7 @@ def build_mms_manifest(solid: dict, fluid: dict, coupling: dict,
         "sweep": float(solid.get("leading_edge_sweep", 0.0)),
         "x_bound": x_bound,
         "freestream": freestream,
-        "moment_origin_m": np.asarray(
-            mms_params.get("coupled", {}).get("moment_origin_m", [0.0, 0.0, 0.0]), dtype=float
-        ).tolist(),
+        "moment_origin_m": moment_origin.tolist(),
         "structural": {
             "components": components,
             "function_spaces": {
@@ -1104,43 +1130,18 @@ class CoupledMMSTarget:
     def panel_edges(self) -> np.ndarray:
         return np.linspace(0.0, float(self.structural.Ly), int(self.n_span) + 1)
 
-    def panel_force(self, t: float) -> np.ndarray:
-        """Kutta–Joukowski target force at each bound station at time t."""
-        eta = (np.arange(self.n_span, dtype=float) + 0.5) / self.n_span
-        gamma = self.bound_circulation.state(t)
-        rho = float(self.freestream["rho"])
-        speed = float(self.freestream["vinf"])
-        aoa = math.radians(float(self.freestream.get("aoa_deg", 0.0)))
-        gradient = np.asarray(self.freestream.get("gradient", np.zeros(9)), dtype=float).reshape(3, 3).T
-        amplitudes = np.asarray(self.freestream.get("oscillation", np.zeros(3)), dtype=float)
-        wave = np.asarray(self.freestream.get("wavenumber", np.zeros(3)), dtype=float)
-        reference = np.asarray(self.freestream.get("reference", np.zeros(3)), dtype=float)
-        frequency = float(self.freestream.get("frequency_hz", 0.0))
-        phase0 = math.radians(float(self.freestream.get("phase_deg", 0.0)))
-
-        force = np.zeros((self.n_span, 3), dtype=float)
-        dt = float(t)
-        xb = float(self.geometry.x_bound if self.geometry.x_bound is not None else 0.25 * self.structural.Lx)
-        for i, eta_i in enumerate(eta):
-            y = float(self.y_stations[i])
-            x = xb
-            surface_velocity = self.geometry.velocity(x, y, dt)
-            point = self.geometry.point(x, y, dt)
-            xp = point - reference
-            base = speed * np.asarray((math.cos(aoa), 0.0, math.sin(aoa)))
-            gust_phase = 2.0 * math.pi * frequency * dt + phase0
-            gust = amplitudes * np.sin(gust_phase + np.asarray((wave[1] * xp[1], wave[2] * xp[2], wave[0] * xp[0])))
-            local_velocity = base + gradient @ xp + gust - surface_velocity
-            chord_i = self.tip_chord * (1.0 - eta_i) + self.chord * eta_i
-            circulation_line = np.asarray((0.0, chord_i, 0.0))
-            force[i] = rho * gamma[i] * np.cross(local_velocity, circulation_line)
-        return force
-
     @classmethod
     def from_manifest(cls, data: dict) -> "CoupledMMSTarget":
         """Reconstruct CoupledMMSTarget from manifest JSON dictionary."""
+        if "moment_origin_m" not in data:
+            raise ValueError("MMS manifest is missing the configured common moment_origin_m")
+        origin = np.asarray(data["moment_origin_m"], dtype=float)
+        if origin.shape != (3,) or not np.isfinite(origin).all():
+            raise ValueError("MMS manifest moment_origin_m must be a finite length-three vector")
         Lx = float(data["Lx"])
         Ly = float(data["Ly"])
+        if not math.isfinite(Lx) or not math.isfinite(Ly) or Lx <= 0.0 or Ly <= 0.0:
+            raise ValueError("MMS manifest structural dimensions Lx and Ly must be finite and positive")
         structural = StructuralTarget(Lx, Ly, data["structural"]["components"])
         geometry = GeometryTarget(structural, float(data["sweep"]), float(data["x_bound"]))
         p_pop = ParticlePopulation.from_dict(data["particles"], lambda_sigma=float(data.get("lambda_sigma", 2.0)))
@@ -1151,17 +1152,27 @@ class CoupledMMSTarget:
             b=np.asarray(bc_data["b"], dtype=float),
             omega=float(bc_data["omega"]),
         )
+        n_span = int(data["n_span"])
+        y_stations = np.asarray(data["y_stations"], dtype=float)
+        if n_span <= 0 or y_stations.shape != (n_span,) or not np.isfinite(y_stations).all():
+            raise ValueError("MMS manifest n_span and y_stations have invalid dimensions or values")
+        if np.any(np.diff(y_stations) <= 0.0):
+            raise ValueError("MMS manifest y_stations must be strictly increasing")
+        if np.any(y_stations <= 0.0) or np.any(y_stations >= Ly):
+            raise ValueError("MMS manifest target span stations must lie strictly inside (0, Ly)")
+        if bound_circ.gamma0.shape != (n_span,):
+            raise ValueError("MMS bound-circulation arrays must match the manifest station count")
         return cls(
             structural=structural,
             geometry=geometry,
             particles=p_pop,
             bound_circulation=bound_circ,
-            n_span=int(data["n_span"]),
-            y_stations=np.asarray(data["y_stations"], dtype=float),
+            n_span=n_span,
+            y_stations=y_stations,
             chord=float(data["chord"]),
             tip_chord=float(data.get("tip_chord", data["chord"])),
             freestream=data["freestream"],
-            moment_origin_m=np.asarray(data.get("moment_origin_m", [0.0, 0.0, 0.0]), dtype=float),
+            moment_origin_m=origin,
             T=float(data.get("T", 0.0)),
         )
 
@@ -1200,6 +1211,86 @@ def _target_function(model, target: CoupledMMSTarget, t: float, order: int, spac
     w = interpolate(wexpr, Vw)
     theta = interpolate(thetexpr, Vtheta)
 
+    out = Function(model.V)
+    FunctionAssigner(model.V, [Vu, Vw, Vtheta]).assign(out, [u, w, theta])
+    return out
+
+
+class DiscreteGeneralizedAlphaTarget:
+    """Endpoint-exact manufactured history for the discrete GA equations.
+
+    Each coefficient multiplies the same spatial envelope B(x,y).  The target
+    displacement is prescribed at endpoints; velocity and acceleration at a
+    new endpoint are obtained from the exact Newmark/generalized-alpha update
+    used by the solver.  The returned stage states therefore match the
+    production time integrator while retaining an endpoint displacement
+    target.
+    """
+
+    names = ("u", "v", "w", "theta_x", "theta_y")
+
+    def __init__(self, target: CoupledMMSTarget, alpha_m: float, alpha_f: float,
+                 dt: float):
+        self.target = target
+        self.alpha_m, self.alpha_f, self.dt = map(float, (alpha_m, alpha_f, dt))
+        if not all(math.isfinite(v) for v in (self.alpha_m, self.alpha_f, self.dt)) or self.dt <= 0:
+            raise ValueError("generalized-alpha target requires finite parameters and positive dt")
+        self.gamma = 0.5 + self.alpha_f - self.alpha_m
+        self.beta = (self.gamma + 0.5) ** 2 / 4.0
+        if self.beta <= 0.0:
+            raise ValueError("generalized-alpha beta must be positive")
+        self.time = 0.0
+        self.q = self._exact(0.0, 0)
+        self.v = self._exact(0.0, 1)
+        self.a = self._exact(0.0, 2)
+
+    def _exact(self, time: float, order: int) -> np.ndarray:
+        return np.asarray([
+            temporal(**self.target.structural.components[name], t=time, order=order)
+            for name in self.names
+        ], dtype=float)
+
+    def advance(self, time: float, dt: Optional[float] = None) -> dict:
+        step = self.dt if dt is None else float(dt)
+        endpoint = float(time)
+        tol = 64.0 * np.finfo(float).eps * max(1.0, abs(endpoint), abs(self.time), step)
+        if not math.isfinite(endpoint) or not math.isfinite(step) or step <= 0.0:
+            raise ValueError("generalized-alpha target step requires finite time and positive dt")
+        if abs(step - self.dt) > tol or abs(endpoint - self.time - step) > tol:
+            raise ValueError("generalized-alpha target steps must be contiguous and use configured dt")
+        q_new = self._exact(endpoint, 0)
+        a_new = ((q_new - self.q - step * self.v) / (self.beta * step**2)
+                 - (1.0 - 2.0 * self.beta) / (2.0 * self.beta) * self.a)
+        v_new = self.v + step * ((1.0 - self.gamma) * self.a + self.gamma * a_new)
+        result = {
+            "time": endpoint,
+            "dt": step,
+            "q_endpoint": q_new.copy(),
+            "q_alpha_f": self.alpha_f * self.q + (1.0 - self.alpha_f) * q_new,
+            "v_alpha_f": self.alpha_f * self.v + (1.0 - self.alpha_f) * v_new,
+            "a_alpha_m": self.alpha_m * self.a + (1.0 - self.alpha_m) * a_new,
+        }
+        self.q, self.v, self.a, self.time = q_new, v_new, a_new, endpoint
+        return result
+
+
+def _target_function_from_coefficients(model, target: CoupledMMSTarget,
+                                       coefficients: np.ndarray, spaces: list):
+    """Interpolate five envelope-scaled coefficients into the mixed FE space."""
+    from dolfin import Expression, Function, FunctionAssigner, interpolate
+    values = np.asarray(coefficients, dtype=float)
+    if values.shape != (5,) or not np.isfinite(values).all():
+        raise ValueError("target stage coefficients must be a finite five-vector")
+    Vu = spaces[0][0] if isinstance(spaces[0], tuple) else spaces[0]
+    Vw = spaces[1][0] if isinstance(spaces[1], tuple) else spaces[1]
+    Vtheta = spaces[2][0] if isinstance(spaces[2], tuple) else spaces[2]
+    Lx, Ly = float(target.structural.Lx), float(target.structural.Ly)
+    envelope_code = (f"pow(sin(pi*x[0]/{Lx:.17g}),4)*"
+                     f"pow(sin(pi*x[1]/{Ly:.17g}),4)")
+    codes = [f"{value:.17g}*({envelope_code})" for value in values]
+    u = interpolate(Expression((codes[0], codes[1]), degree=8), Vu)
+    w = interpolate(Expression(codes[2], degree=8), Vw)
+    theta = interpolate(Expression((codes[3], codes[4]), degree=8), Vtheta)
     out = Function(model.V)
     FunctionAssigner(model.V, [Vu, Vw, Vtheta]).assign(out, [u, w, theta])
     return out
@@ -1268,65 +1359,71 @@ class ReferenceForceFunctional:
 
 
 def add_coupled_mms_source(model, target: CoupledMMSTarget, t: float,
-                           reference_force: ReferenceForceFunctional, spaces: list):
-    """Assembles the independent manufactured structural source for the coupled FSI solve.
+                           reference_force: ReferenceForceFunctional, spaces: list,
+                           q_stage=None, v_stage=None, a_stage=None):
+    """Assemble a fully discrete generalized-alpha MMS right-hand side.
 
-    f_s^* = M(q_s^*) + C(q_dot_s^*) + K(q_s^*) - F_s^*
-
-    INDEPENDENCE GUARANTEE:
-    This source is assembled directly from the independent continuous strong-form
-    Reissner–Mindlin differential operator integrated against test functions,
-    minus the independent analytical interface force reference_force.
-    It does NOT call model.mass_form(), model.damping_form(), or model.internal_work().
+    The independently written UFL form evaluates inertia, Rayleigh damping,
+    and nonlinear internal work at the same mixed-alpha stage states as the
+    production residual. It then subtracts the independent aerodynamic force
+    at the endpoint exchange time. No production residual/form methods are
+    called here. Stage states are mesh-attached mixed Functions.
     """
-    from dolfin import Expression, assemble, inner, split, dx
-    import re
-    global _CACHED_MMS_FORMS
+    from dolfin import (Constant, Identity, assemble, dot, dx, grad, inner,
+                        outer, split, sym, tr)
+    if q_stage is None or v_stage is None or a_stage is None:
+        raise ValueError("fully discrete MMS source requires q, v, and a generalized-alpha stages")
+    qu, qw, qtheta = split(q_stage)
+    vu, vw, vtheta = split(v_stage)
+    au, aw, atheta = split(a_stage)
+    tu, tw, ttheta = split(model.q_test)
+    dxx = dx(domain=model.domain.mesh, metadata={"quadrature_degree": 24})
 
-    # Lazy initialization and caching of symbolic load expressions on the model
-    if not hasattr(model, "_mms_force_expressions"):
-        cfg = {
-            "root_chord": target.structural.Lx,
-            "span": target.structural.Ly,
-            "E": model.E,
-            "nu": model.nu,
-            "rho_s": model.rho,
-            "thickness_ratio": float(model.domain.h) / float(target.structural.Lx),
-            "eta_m": model.eta_m,
-            "eta_k": model.eta_k,
-            "kappa_shear": model.kappa_shear,
-        }
-        nonlinear = getattr(model, "geometric_nonlinearity", True)
-        mms_sym = build_plate_mms_sympy(cfg, nonlinear=nonlinear, components=target.structural.components)
+    h, rho = model.h, model.rho
+    E, nu = float(model.E), float(model.nu)
+    shear = Constant(float(model.kappa_shear) * E / (2.0 * (1.0 + nu)) * h)
+    inertia = rho * h * (inner(au, tu) + aw * tw) + rho * h**3 / 12.0 * inner(atheta, ttheta)
+    damping_mass = rho * h * (inner(vu, tu) + vw * tw) + rho * h**3 / 12.0 * inner(vtheta, ttheta)
 
-        def _clean_code(expr):
-            code = sp.ccode(expr)
-            code = re.sub(r"\bx\b", "x[0]", code)
-            return re.sub(r"\by\b", "x[1]", code)
+    def linear_stress(field):
+        strain = sym(grad(field))
+        return E * h / (1.0 - nu**2) * ((1.0 - nu) * strain + nu * tr(strain) * Identity(2))
 
-        fu_code = tuple(_clean_code(mms_sym.loads[0][i]) for i in range(2))
-        fw_code = _clean_code(mms_sym.loads[1])
-        fth_code = tuple(_clean_code(mms_sym.loads[2][i]) for i in range(2))
+    def bending_moment(field):
+        curvature = sym(grad(field))
+        return E * h**3 / (12.0 * (1.0 - nu**2)) * (
+            (1.0 - nu) * curvature + nu * tr(curvature) * Identity(2)
+        )
 
-        model._mms_fu = Expression(fu_code, degree=8, t=float(t))
-        model._mms_fw = Expression(fw_code, degree=8, t=float(t))
-        model._mms_fth = Expression(fth_code, degree=8, t=float(t))
+    # Reference linear stiffness applied to velocity for eta_k damping.
+    damping_stiffness = (
+        inner(linear_stress(vu), sym(grad(tu)))
+        + inner(bending_moment(vtheta), sym(grad(ttheta)))
+        + shear * inner(grad(vw) - vtheta, grad(tw) - ttheta)
+    )
 
-        test_u, test_w, test_theta = split(model.q_test)
-        source_measure = dx(domain=model.domain.mesh, metadata={"quadrature_degree": 24})
-        model._mms_source_form = (
-            inner(model._mms_fu, test_u)
-            + model._mms_fw * test_w
-            + inner(model._mms_fth, test_theta)
-        ) * source_measure
-        model._mms_force_expressions = True
-
-    # Update continuous evaluation time
-    model._mms_fu.t = float(t)
-    model._mms_fw.t = float(t)
-    model._mms_fth.t = float(t)
-
-    source = assemble(model._mms_source_form)
+    if getattr(model, "geometric_nonlinearity", True):
+        grad_u, grad_w = grad(qu), grad(qw)
+        membrane_strain = sym(grad_u) + 0.5 * outer(grad_w, grad_w)
+        virtual_strain = sym(grad(tu)) + sym(outer(grad_w, grad(tw)))
+        if getattr(model, "include_quadratic_inplane_strain", True):
+            membrane_strain += 0.5 * dot(grad_u.T, grad_u)
+            virtual_strain += sym(dot(grad_u.T, grad(tu)))
+    else:
+        membrane_strain = sym(grad(qu))
+        virtual_strain = sym(grad(tu))
+    membrane_stress = E * h / (1.0 - nu**2) * (
+        (1.0 - nu) * membrane_strain + nu * tr(membrane_strain) * Identity(2)
+    )
+    moment = bending_moment(qtheta)
+    internal = (
+        inner(membrane_stress, virtual_strain)
+        + inner(moment, sym(grad(ttheta)))
+        + shear * inner(grad(qw) - qtheta, grad(tw) - ttheta)
+    )
+    form = (inertia + float(model.eta_m) * damping_mass
+            + float(model.eta_k) * damping_stiffness + internal) * dxx
+    source = assemble(form)
     source.axpy(-1.0, reference_force.vector(float(t)))
     for bc in model.bcs:
         bc.apply(source)

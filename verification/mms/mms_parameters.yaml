@@ -89,8 +89,9 @@ particles:
 
 # ---------------------------------------------------------------------------
 # BOUND CIRCULATION TARGET  Γ_b*(η_s, t) = γ₀ + a·sin(ω t) + b·cos(ω t)
-#   Used to construct the analytical Kutta–Joukowski panel force in the
-#   coupled MMS structural source (independent of ALM solve).
+#   Imposed in the isolated manufactured target VLM solve and used to
+#   construct the independent Kutta–Joukowski force reference. The main
+#   production wing solve remains independently compared against this target.
 bound_circulation:
   gamma0: 1.0e-4   # m³/s  base bound circulation
   a:      1.0e-5   # m³/s  sine  modulation amplitude
@@ -154,6 +155,21 @@ coupled:
   spatial_levels:   [1, 2, 4, 8]    # L = 1, 2, 4, 8 (N particles = n_base * L)
   temporal_levels:  [1, 2, 4, 8]    # dt/L  (spatial mesh fixed at level 4)
   time_match_tolerance_s: 1.0e-10
+  # Hard gates for the directly manufactured production-VLM linear solve.
+  # MUMPS direct factorization in Float64 should leave backward error near
+  # machine precision; 1e-10 permits conditioning/serialization effects while
+  # still detecting a materially incorrect target solve.
+  target_vlm_circulation_rtol: 1.0e-10
+  vlm_algebraic_residual_rtol: 1.0e-10
+  vlm_reported_error_atol: 5.0e-13
+  moment_origin_csv_atol_m: 5.0e-12
+  target_station_atol_m: 5.0e-12
+  # Exact force/moment constraints use double precision and small dense
+  # constraint systems; this gate admits only roundoff-level conservation.
+  transfer_wrench_rtol: 1.0e-10
+  # The same transfer matrices define both sides of the discrete virtual-work
+  # identity; this is a roundoff gate, not a convergence tolerance.
+  transfer_work_rtol: 1.0e-10
 
 # ---------------------------------------------------------------------------
 # SOLVER TOLERANCES FOR MMS SUB-PROBLEMS

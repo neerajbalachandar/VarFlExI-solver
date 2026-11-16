@@ -25,7 +25,7 @@ Unified MMS Verification Suite (CMAME Framework):
   test          Run automated consistency tests (derivatives, BCs, independence, RK3, work)
   structural    Standalone Reissner–Mindlin plate MMS (spatial & temporal refinement)
   transfer      Interface force/moment transfer MMS (CRM & RBF work duality)
-  fluid         Particle-level rVPM MMS (standalone source, stretching FD, RK3 convergence)
+  fluid         Particle-level rVPM MMS (analytic stretching source and RK3 convergence)
   coupled       Coupled FSI MMS refinement across levels
   all           Run the full verification suite
 
@@ -61,17 +61,7 @@ run_transfer() {
 
 run_fluid() {
     echo "=== Running Particle-Level rVPM MMS ==="
-    # Generate manifest first if not present
-    run_python verification/mms/mms_driver.py coupled --dry-run
-    local manifest="verification/mms/results/coupled/manifest_level1.json"
-    "$JULIA_BIN" --project="$FLOWUNSTEADY_PROJECT" verification/mms/mms_rvpm.jl \
-        --manifest "$manifest" \
-        --output verification/mms/results/particles \
-        --study standalone
-    "$JULIA_BIN" --project="$FLOWUNSTEADY_PROJECT" verification/mms/mms_rvpm.jl \
-        --manifest "$manifest" \
-        --output verification/mms/results/particles \
-        --study refinement
+    run_python verification/mms/mms_driver.py fluid
 }
 
 run_coupled() {
@@ -86,10 +76,7 @@ case "$phase" in
     fluid)            run_fluid ;;
     coupled)          run_coupled ;;
     all)
-        run_test
-        run_structural
-        run_transfer
-        run_fluid
-        run_coupled
+        echo "=== Running Full MMS Verification Suite ==="
+        run_python verification/mms/mms_driver.py all
         ;;
 esac

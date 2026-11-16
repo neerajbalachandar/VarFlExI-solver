@@ -21,7 +21,8 @@ from pathlib import Path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from verification.mms.mms_problem import (
     CoupledMMSTarget as PythonMMSTarget,
-    ReferenceForceFunctional, add_coupled_mms_source, _target_function,
+    DiscreteGeneralizedAlphaTarget, ReferenceForceFunctional,
+    _target_function_from_coefficients, add_coupled_mms_source, _target_function,
 )
 
 from utils import SolidDomain, ReissnerMindlinModel
@@ -112,6 +113,18 @@ class StructuralSolver:
                 self.model, self.mms_target, eta_cp=self.eta_cp
             )
             self.mms_spaces = [self.model.V.sub(i).collapse() for i in range(3)]
+            alpha_m = float(self.model.integrator.alpha_m)
+            alpha_f = float(self.model.integrator.alpha_f)
+            gamma = 0.5 + alpha_f - alpha_m
+            beta = (gamma + 0.5) ** 2 / 4.0
+            self.mms_target_history = DiscreteGeneralizedAlphaTarget(
+                self.mms_target, alpha_m, alpha_f, self.dt_value
+            )
+            if (not math.isclose(self.mms_target_history.gamma, gamma, rel_tol=0.0, abs_tol=1.0e-14)
+                    or not math.isclose(self.mms_target_history.beta, beta, rel_tol=0.0, abs_tol=1.0e-14)
+                    or not math.isclose(float(self.model.integrator.gamma), gamma, rel_tol=0.0, abs_tol=1.0e-14)
+                    or not math.isclose(float(self.model.integrator.beta), beta, rel_tol=0.0, abs_tol=1.0e-14)):
+                raise RuntimeError("Independent MMS generalized-alpha coefficients disagree with the production integrator")
             # The numerical solve starts from the target's declared initial
             # data. For the current ramp target q(0)=q_t(0)=0 while q_tt(0)
             # is generally nonzero; this is an initial condition, not a
@@ -131,6 +144,8 @@ class StructuralSolver:
                 "numerical_state", "state_error_l2_coefficient_diagnostic", "source_l2",
                 "e_u0", "e_v0", "e_w", "e_theta_x", "e_theta_y",
                 "source_evaluation_time_s", "t_alpha_m_s", "t_alpha_f_s",
+                "dt_s", "alpha_m", "alpha_f", "gamma", "beta",
+                "q_alpha_f_coefficients", "v_alpha_f_coefficients", "a_alpha_m_coefficients",
             ))
 
     def _setup_simulation_data(self):
@@ -732,9 +747,25 @@ class StructuralSolver:
                         f"MMS fluid/solid force clocks differ: fluid={physical_time:.16g} s, "
                         f"solid={expected_time:.16g} s, tolerance={clock_tolerance:g} s"
                     )
+                payload_dt = float(data.get("dt", self.dt_value))
+                if not math.isfinite(payload_dt) or abs(payload_dt - self.dt_value) > clock_tolerance:
+                    raise RuntimeError(
+                        f"MMS fluid/solid step sizes differ: fluid={payload_dt:.16g} s, "
+                        f"solid={self.dt_value:.16g} s, tolerance={clock_tolerance:g} s"
+                    )
+                discrete_stage = self.mms_target_history.advance(physical_time, payload_dt)
+                q_stage = _target_function_from_coefficients(
+                    self.model, self.mms_target, discrete_stage["q_alpha_f"], self.mms_spaces
+                )
+                v_stage = _target_function_from_coefficients(
+                    self.model, self.mms_target, discrete_stage["v_alpha_f"], self.mms_spaces
+                )
+                a_stage = _target_function_from_coefficients(
+                    self.model, self.mms_target, discrete_stage["a_alpha_m"], self.mms_spaces
+                )
                 self.mms_rhs_source = add_coupled_mms_source(
                     self.model, self.mms_target, physical_time, self.reference_force,
-                    self.mms_spaces,
+                    self.mms_spaces, q_stage=q_stage, v_stage=v_stage, a_stage=a_stage,
                 )
                 if i_step == 0:
                     self._mms_target_force_current = target_force.copy()
@@ -842,6 +873,14 @@ class StructuralSolver:
                     f"{physical_time:.16e}",
                     f"{physical_time - float(self.model.integrator.alpha_m) * self.dt_value:.16e}",
                     f"{physical_time - float(self.model.integrator.alpha_f) * self.dt_value:.16e}",
+                    f"{self.dt_value:.16e}",
+                    f"{float(self.model.integrator.alpha_m):.16e}",
+                    f"{float(self.model.integrator.alpha_f):.16e}",
+                    f"{float(self.model.integrator.gamma):.16e}",
+                    f"{float(self.model.integrator.beta):.16e}",
+                    json.dumps(discrete_stage["q_alpha_f"].tolist()),
+                    json.dumps(discrete_stage["v_alpha_f"].tolist()),
+                    json.dumps(discrete_stage["a_alpha_m"].tolist()),
                 ))
                 self.mms_history.flush()
             solid_solve_time = perf_counter() - solid_solve_start
@@ -867,7 +906,6 @@ class StructuralSolver:
                     forces_eff,
                     nodal_forces,
                     epsilon_reg=self.epsilon_reg,
-                    moment_origin=self.moment_origin_m,
                 )
                 self.incremental_work_Wf[i_step] = Wf
                 self.incremental_work_Ws[i_step] = Ws
@@ -897,6 +935,7 @@ class StructuralSolver:
                     ),
                     nodal_forces,
                     epsilon_reg=self.epsilon_reg,
+                    moment_origin=self.moment_origin_m,
                 )
                 self.force_transfer_residual_norms[i_step] = np.linalg.norm(force_residual)
                 self.moment_transfer_residual_norms[i_step] = np.linalg.norm(moment_residual)

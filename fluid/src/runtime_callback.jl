@@ -102,6 +102,7 @@ function solve_mms_target_aerodynamics!(PFIELD, T, DT)
     # then inject it as a normal-velocity correction into the production
     # solver's RHS adapter.  This does not overwrite Gamma after the solve.
     target_gamma = bound_circulation_state(mms_target, T, m)
+    target_dgamma = bound_circulation_derivative(mms_target, T, m)
     hs = vlm.getHorseshoes(wing; t=T)
     foreach(hs) do horseshoe
         horseshoe[8] = nothing
@@ -174,7 +175,7 @@ function solve_mms_target_aerodynamics!(PFIELD, T, DT)
                            segment == 2 ? b[panel] - a[panel] : bp[panel] - b[panel]
             fmat[panel,:] .+= rho * gamma .* cross(velocity, bound_vector)
         end
-        dgamma = (target_gamma[panel] - bound_circulation_state(mms_target, T-DT, m)[panel]) / DT
+        dgamma = target_dgamma[panel]
         l1a, l2a = ap[panel] - a[panel], b[panel] - a[panel]
         l1b, l2b = a[panel] - b[panel], bp[panel] - b[panel]
         triangle_scale = 1.0 / (2.0 * (1.0 - vlm.pn))
@@ -395,6 +396,7 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
             "target_particle_ids" => mms_target.ids,
             "numerical_particle_ids" => mms_target.ids,
             "target_bound_circulation" => target_gamma,
+            "target_y_stations_m" => Float64.(mms_target.data["y_stations"]),
             "target_force" => target_force,
             "target_cl" => target_cl,
             "target_cd" => target_cd,
