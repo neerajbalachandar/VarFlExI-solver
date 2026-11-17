@@ -15,7 +15,7 @@ from pathlib import Path
 
 import yaml
 
-from field_mms import analytical_check
+from field_mms import analytical_check, configured_particle_freestream, freestream_match
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
@@ -34,7 +34,13 @@ def run_preflight(config_dir: Path, out: Path) -> dict:
     actual_sfs = str(fluid.get("vpm_sfs", "none")).strip().lower()
     viscous_off = actual_viscous in ("none", "off", "false", "nothing")
     sfs_off = actual_sfs in ("none", "off", "false")
-    report = analytical_check(HERE / "field_mms_parameters.yaml")
+    report = analytical_check(
+        HERE / "field_mms_parameters.yaml", fluid_config=fluid,
+        geometry_lengths=(float(solid["root_chord"]), float(solid["span"])))
+    final_time = float(report["field_temporal_final_time_s"])
+    expected_freestream = configured_particle_freestream(fluid, final_time)
+    report["freestream_convention_check"] = freestream_match(
+        report["freestream_pfield_origin_m_s"], expected_freestream)
     report["production_config_check"] = {
         "fluid_config": str((config_dir / "fluid_params.yaml").resolve()),
         "solid_geometry_m": {"span": float(solid["span"]),
@@ -47,6 +53,14 @@ def run_preflight(config_dir: Path, out: Path) -> dict:
         "effective_runtime_types_are_checked_by": "reconstruct_fields.jl",
         "expected_viscous_scheme": expected["viscous_scheme"],
         "expected_vpm_sfs": expected["vpm_sfs"],
+        "fixed_particle_lifecycle": {
+            "status": "NOT_CONFIGURED_OR_AUDITED_BY_MMS_2_DRIVER",
+            "reason": "The continuum field source projection is unresolved; production shedding and pruning controls are not overridden here.",
+            "required_controls_for_future_field_case": yaml.safe_load(
+                (HERE / "field_mms_parameters.yaml").read_text(encoding="utf-8"))[
+                    "particles"]["fixed_population_controls"],
+            "count_audit_helper": "reconstruct_fields.jl:audit_fixed_population_history",
+        },
     }
     if not (viscous_off and sfs_off):
         report["status"] = "FAIL"

@@ -1,163 +1,129 @@
-# `mms_2`: velocity–vorticity MMS
+# `mms_2`: velocity–vorticity MMS groundwork
 
-`mms_2` is an isolated copy of the previous MMS tools plus a new analytical
-continuum velocity–vorticity target and FLOWUnsteady particle-field
-reconstruction utilities. Its target source is derived independently of the
-production solver. The structural study retains the copied Reissner–Mindlin
-formulation.
+`mms_2` is isolated under this directory. It contains the copied structural
+tools, a symbolic continuum target, reconstruction utilities, and a separate
+dispatcher. The analytical target and reconstruction helper do not yet form a
+standalone fluid verification pipeline: `fluid` and `coupled` deliberately
+exit with status 2 until the continuum source is projected consistently onto
+the full rVPM particle state and applied at its RK3 stages.
 
-## Current implementation boundary
+## Implementation status
 
-The analytical target, continuum source, grid error metrics, preflight, and
-full-particle-field reconstruction are implemented. The standalone structural
-mode is runnable. **The continuum fluid and coupled solver modes fail closed**
-until a defensible projection from the continuum forcing to the production
-rVPM particle state and RK3 stage update is implemented. This is intentional:
-the older `particle-discrete` mode verifies a fixed particle ODE and cannot be
-reported as a full-domain field MMS. No field convergence result is claimed.
+| Area | Status | What the status means |
+|---|---|---|
+| Analytical target | Implemented; current edits not run | Localized vector-potential target, total-velocity source, and symbolic identities are defined. |
+| Standalone structural MMS | Inherited implementation available; not run here | Uses `mms_parameters.yaml` through the copied legacy driver. |
+| Particle-discrete verification | Inherited discrete ODE study available; not run here | Verifies the inherited particle-state formulation, not a continuum field MMS. |
+| Eulerian particle-field reconstruction | Helper functions implemented; not wired to a driver | Requires a valid complete-particle snapshot manifest and a caller-supplied FLOWUnsteady `ParticleField` and grids. No reconstruction result is claimed. |
+| Standalone continuum fluid MMS | Unsupported; fail closed | Full-state source projection and its RK3-stage treatment are unresolved. |
+| Coupled fluid–structure MMS | Unsupported; fail closed | Fluid source projection plus consistent interface force and coupled residuals are unresolved. |
 
-The field source must not be added to particle circulation by simply sampling
-`s_omega` at particle locations. In general, particle positions, circulation,
-and core radii all affect the reconstructed field. A valid source needs to
-specify the particle-state projection, its residual in the Eulerian field
-norm, and how it is applied at each production RK3 stage. The present tree
-does not yet implement that derivation or connect a field-source callback to
-the production fluid runtime. Consequently, `fluid` and `coupled` stop after
-preflight rather than launch a different, misleading calculation.
+No field or coupled convergence result is available. Do not interpret a
+successful analytical preflight as a numerical solver verification.
 
-## Continuum formulation
+## Analytical target
 
-There is no pressure field. `field_mms.py` defines a smooth vector potential
-`A*(x,t)`, then constructs
+`field_mms.py` builds a spatially compact vector potential with an ellipsoidal
+support. The potential is a `C4` bump with value and its first four normal
+derivatives vanishing at the support boundary. SymPy constructs
 
 ```text
-u*      = curl(A*)
-omega*  = curl(u*)
-s_omega = d_t omega* + (u* . grad) omega* - (omega* . grad) u*
+u_induced* = curl(A*)
+u_total*   = U_inf + u_induced*
+omega*     = curl(u_total*)
+s_omega*   = d_t omega* + (u_total* . grad) omega*
+                         - (omega* . grad) u_total*
 ```
 
-SymPy differentiates these expressions. The curl construction makes
-`div(u*) = 0` identically. The first case is inviscid and has no SFS terms;
-the source above is therefore the complete continuum vorticity residual.
-Velocity/vorticity target norms are checked at the common final time and a
-near-zero normalization is rejected.
+The configured uniform freestream is evaluated at the same origin and time
+convention as production `pfield.Uinf(pfield.t)`. `reconstruct_fields.jl`
+requests `add_Uinf=true` once; its API supplies induced velocity and the
+wrapper checks the explicit production freestream against the Python value.
+The source uses total velocity. The compact induced field is divergence-free,
+and `omega=curl(u_induced)` is its vorticity. In unbounded free space, the
+decaying Biot–Savart inverse of this divergence-free induced velocity’s curl
+recovers that induced velocity; uniform freestream is kept outside that
+induced inversion. This is an analytical compatibility identity, not a
+discrete reconstruction accuracy result.
 
-## What the inherited implementation measured
+The configured Eulerian box must strictly contain the target support. Runtime
+reconstruction separately checks the complete particle/core envelope against
+the requested box. Preflight’s `8×8×8` grid is for lightweight analytical
+checks only; it is not used for final norms or convergence measurements.
 
-- `mms_problem.py` constructs the five structural manufactured fields and
-  independent structural loads.
-- The inherited Julia particle study checks a fixed-population discrete rVPM
-  ODE. It is not a continuum Navier–Stokes field MMS.
-- The coupled particle target/source and aerodynamic target are independent
-  discrete-model machinery. The target aerodynamic particle field is not the
-  production fluid field and is not used by the new reconstruction.
-- Earlier fluid diagnostics used a handful of fixed probes; these are not
-  full-domain velocity/vorticity errors.
-- The production particle field is assembled from dynamic particles and
-  static particles. FLOWVPM's `ParticleField` carries both populations; the
-  reconstruction wrapper counts both and passes that complete field once.
-  Static bound-vorticity particles already present in the field are included
-  exactly once. It does not append the isolated target field.
+## Reconstruction helpers and safeguards
 
-## Reconstruction and errors
+`reconstruct_fields.jl` provides separate helpers to load a complete saved
+particle population manifest, inspect particle counts and core sizes,
+reconstruct `U` and `Wapprox`, audit fixed counts over supplied time-step
+records, and compare a nominal grid with a refined grid on common nodes. The
+manifest loader requires one dynamic population first and all required static
+populations, rejects duplicate population names/files, and compares declared
+counts against each HDF5 snapshot’s saved `np` metadata and the number actually
+loaded. These helpers are not called by `mms2_driver.py`; complete-population
+loading and fixed-count verification have therefore not been demonstrated for
+a production field case.
 
-`reconstruct_fields.jl` uses the installed
-`FLOWUnsteady.computefluiddomain(pfield, grids; ...)` overload. The pinned local
-environment is FLOWUnsteady 3.4.0 / FLOWVLM 2.1.4 / FLOWVPM 4.0.3. For this API:
+The reconstruction wrapper uses the installed FLOWUnsteady particle field,
+kernel, and `zeta_fmm` RBF vorticity field without changing particle strengths
+or core sizes. It adds the actual `pfield.Uinf(pfield.t)` exactly once. Sampling
+probes have zero circulation and must be removed after evaluation. Runtime
+checks require at least 8 intervals per smallest particle-core scale and 20
+intervals per smallest prescribed target length scale. The latter is the
+localized target’s minimum support radius, used as a conservative feature
+scale; it is not a periodic wavelength. The actual spacings, particle-core
+minimum, and target scale are returned in reconstruction metadata.
 
-- `U` and `W` are induced fields; the docs and installed source say they omit
-  freestream. The wrapper adds `pfield.Uinf(pfield.t)` once to velocity.
-- `Wapprox` is the installed `FLOWVPM.zeta_fmm` RBF vorticity reconstruction.
-  This is the field compared to analytical `omega*`, rather than a finite
-  difference of sampled velocity.
-- The production kernel is kept; all particle cores use `scale_sigma=1.0`.
-  No circulation clipping, core shrinkage, local particle filtering, or extra
-  smoothing is applied. Grid probes have zero circulation.
-- The wrapper checks complete dynamic/static counts, core-size statistics,
-  source particle bounds plus four maximum core radii, and a minimum two-core
-  boundary clearance. It requires preallocated capacity for all grid probes
-  and verifies those probes are removed afterward.
-- The installed Gaussian kernel has infinite support. The four-core-radius
-  margin is an envelope safety check, not a particle cutoff; every particle
-  remains in the field evaluation regardless of its distance from the grid.
-- Use one fixed box across levels. `field_mms_parameters.yaml` records bounds,
-  resolution criteria, and a doubled-grid sensitivity case. Grid cell counts
-  are derived from the measured minimum particle core and target wavelength;
-  the wrapper rejects grids that fail the three-interval core and
-  eight-interval target criteria. The resolution plan is deliberately
-  separate from FEM, VLM, and particle spacing.
+The grid sensitivity helper uses the configured refinement factor and
+relative tolerance (currently 2 and 1%). It compares velocity and vorticity
+on shared nodes, requires identical domains and nested grid coordinates, and
+fails if either field exceeds the threshold. It has not been run on a particle
+field. The helper must be supplied Python coordinate samples for the actual
+nominal grid; coordinate values, flattening, and a known polynomial vector
+probe are checked in Julia before field errors are calculated.
 
-`field_mms.py` supplies common Cartesian trapezoid weights and full-domain
-absolute/relative L2, component L2, target/numerical norms, and maximum
-absolute errors. It rejects zero/near-zero target norms and nonfinite values.
-`observed_orders` omits an order unless the error decreases and the spacing is
-strictly refined. Refinement configuration keeps structural elements, VLM
-stations, reconstruction cells, and time step as separate values.
+## Metrics and refinement ownership
 
-## Runtime model inspection
+`field_mms.py` retains tensor-product Cartesian trapezoid weights and weighted
+vector/component L2 errors. Inputs, errors, scales, and norms must be finite;
+target normalization must be nonzero. Logarithmic order calculations require
+positive errors and strictly decreasing scales, explicit common domain and
+field-quantity metadata, and report each adjacent pair. Increasing errors are
+flagged as non-monotonic; small changes are flagged as plateaus. These
+utilities have not been applied to numerical field data.
 
-The production YAML options are parsed in `fluid/src/FluidConfig.jl`:
-`viscous_scheme: none` maps to FLOWVPM `Inviscid()`, whose
-`viscousdiffusion(pfield, ::Inviscid, dt)` is a no-op. `vpm_sfs: none` maps in
-`fluid/src/vpm_config.jl` to FLOWVPM `SFS_none` (`NoSFS`); FLOWVPM defines
-`isSFSenabled(::NoSFS) == false`, and its before/after UJ hooks do nothing.
-The production RK3 does call viscous diffusion and gates the SFS calculation
-on `isSFSenabled`, so the effective objects matter. `Estr` implementations
-exist and can be active for non-`NoSFS` models. The FLOWVPM 4.0.3 source checked
-here uses `Eadv` in time-integration comments but contains no `Eadv` model
-implementation in its source tree. The reconstruction wrapper rejects any
-runtime field whose effective viscous or SFS type is not `Inviscid`/`NoSFS`.
-The repository `config/fluid_params.yaml` currently specifies both as `none`.
+- `mms_parameters.yaml` controls inherited standalone structural and legacy
+  particle-discrete settings.
+- `field_mms_parameters.yaml` controls the analytical target, reconstruction
+  box/resolution/sensitivity settings, and field refinement sequence.
+- Field refinement levels are not executed by the structural mode. There are
+  no active coupled refinement settings while coupled MMS is unsupported.
 
-## Configuration and commands
+The fixed-population control requirements in `field_mms_parameters.yaml`
+record the intended starting-wake, unsteady-shedding, boundary-layer-shedding,
+and pruning settings. The mms_2 driver does not override production controls;
+the report marks lifecycle controls unaudited. A future runnable field case
+must provide per-step particle counts and fail on any count change.
 
-All MMS-specific settings are local to `mms_2/field_mms_parameters.yaml`;
-structural settings stay in the copied `mms_parameters.yaml`. Production
-geometry and fluid settings are read from `config/`. Spatial defaults follow
-the requested `(16,96,96)`, `(32,192,192)`, `(64,384,384)` structural/VLM
-levels and fixed `dt=0.00025 s`. Temporal defaults use `0.001`, `0.0005`, and
-`0.00025 s` at the fixed finest spatial setup and common `t_final=0.05 s`.
-Each case's structural `h_mesh` is computed as
-`max(Lx/nx, Ly/ny)` from the production geometry at runtime. Eulerian cell
-counts are derived at runtime from the actual particle core distribution
-rather than guessed before a production particle field exists.
+## Commands
 
 From the repository root:
 
 ```bash
-# Symbolic identities, nonzero target norms, refinement/config checks only
+# Analytical and configuration preflight only; writes an ignored result file
 python3 verification/mms_2/mms2_driver.py preflight
 
-# Retained structural solve (use --dry-run to skip the PDE solve)
+# Inherited structural run, or --dry-run to skip its solve
 verification/mms_2/run_pipeline.sh structural --study spatial
 
-# These currently preflight, then stop because source projection is unresolved
+# These preflight and then exit nonzero while source projection is unresolved
 verification/mms_2/run_pipeline.sh fluid
 verification/mms_2/run_pipeline.sh coupled
 
-# Explicitly run the inherited, discrete particle ODE study
+# Inherited particle-discrete ODE verification; this is not continuum field MMS
 verification/mms_2/run_pipeline.sh particle-discrete
 ```
 
-The field preflight writes `results/fluid/analytical_preflight.json`. Structural,
-particle, and coupled baseline outputs are routed under `verification/mms_2/`.
-The reconstruction helper returns runtime metadata; production integration
-must pass the actual complete `ParticleField` and a grid sized from its
-smallest core before field error analysis can run.
-
-## Remaining work before field MMS runs
-
-1. Define and derive the full particle-state source projection and quantify
-   its field residual independently.
-2. Connect the projected source to the production RK3 stages without changing
-   `verification/mms/` or silently modifying shared production runtime code.
-3. Seed cases and prove all particle populations are resident exactly once;
-   derive the common particle-envelope box and core-resolved grid from actual
-   trajectory/core data.
-4. Export full `U` and `Wapprox` fields at identical target nodes, calculate
-   metrics, run doubled-grid sensitivity, and produce convergence tables.
-5. Integrate the same fluid field errors and consistent interface force into
-   coupled FSI, then inspect numerical convergence.
-
-Do not call the method verified or convergent until those runs complete and
-the errors/orders are reviewed.
+Generated results, snapshots, plots, and caches are ignored by the local
+`.gitignore`. No tests or simulations were run while applying the latest
+corrections.
