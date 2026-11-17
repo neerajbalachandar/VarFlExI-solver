@@ -1,9 +1,0 @@
-<?xml version="1.0"?>
-<Xdmf Version="3.0" xmlns:xi="http://www.w3.org/2001/XInclude">
-  <Domain>
-    <Grid Name="TimeSeries" GridType="Collection" CollectionType="Temporal">
-      <xi:include href="coupled_mms_staticpfield.0.xmf" xpointer="xpointer(/Xdmf/Domain/Grid)" />
-      <xi:include href="coupled_mms_staticpfield.1.xmf" xpointer="xpointer(/Xdmf/Domain/Grid)" />
-    </Grid>
-  </Domain>
-</Xdmf>

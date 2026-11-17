@@ -68,19 +68,13 @@ function solve_mms_target_aerodynamics!(PFIELD, T, DT)
     ap, a, b, bp = (uns._get_Xs(system, key; t=T) for key in ("Ap", "A", "B", "Bp"))
     mids = vcat((ap .+ a)./2, (a .+ b)./2, (b .+ bp)./2)
     points = vcat(cp, mids)
-    grid = [Float64[0.0,0.25span,0.0], Float64[0.75root_chord,0.5span,0.1root_chord],
-            Float64[1.5root_chord,0.75span,0.0]]
     Xh, Gh, Sh = particle_target_state(mms_target, T)
     # Build a disjoint target field: copy only prescribed static/background
     # particles, then append the immutable target population in manifest order.
     # Numerical dynamic particles never enter target flow or force evaluation.
     numerical_count = vpm.get_np(PFIELD)
     static_slots = [i for i in 1:numerical_count if vpm.is_static(vpm.get_particle(PFIELD, i))]
-    # Vvpm_on_Xs temporarily adds one probe per evaluation point, while
-    # mms_probe_fields adds the base point and six finite-difference probes.
-    probe_capacity = max(length(points), 7 * length(grid))
-    target_pf = vpm.ParticleField(
-        length(static_slots) + length(mms_target.ids) + probe_capacity,
+    target_pf = vpm.ParticleField(length(static_slots) + length(mms_target.ids),
         eltype(PFIELD.particles); formulation=PFIELD.formulation, viscous=PFIELD.viscous,
         nt=PFIELD.nt, t=T, transposed=PFIELD.transposed, fmm=PFIELD.fmm,
         SFS=PFIELD.SFS, kernel=PFIELD.kernel, UJ=PFIELD.UJ, Uinf=PFIELD.Uinf,
@@ -131,26 +125,11 @@ function solve_mms_target_aerodynamics!(PFIELD, T, DT)
     manufactured_rhs = A * target_gamma - rhs
     mms_extraVinf = (i, t; kwargs...) ->
         uns._extraVinf2(i, t; kwargs...) .- manufactured_rhs[i] .* view(normals, i, :)
-    # The production VLM solver and the independent finite-segment assembly
-    # can differ by a few ulps in their influence coefficients. Refine the
-    # manufactured normal-velocity correction against the independent matrix
-    # so the solved circulation satisfies the audited target operator.
-    rhs_correction = copy(manufactured_rhs)
-    for _ in 1:4
-        mms_extraVinf = (i, t; kwargs...) ->
-            uns._extraVinf2(i, t; kwargs...) .- rhs_correction[i] .* view(normals, i, :)
-        vlm.solve(system, Vinf; t=T, extraVinf=mms_extraVinf, keep_sol=true,
-                  vortexsheet=(X,t)->zeros(3))
-        circulation_error = target_gamma .- wing.sol["Gamma"]
-        norm(circulation_error) <= 1.0e-12 * max(norm(target_gamma), eps()) && break
-        rhs_correction .+= A * circulation_error
-    end
-    # Audit the solved circulation against the independently assembled target
-    # equation. Production-solver coefficient differences are accounted for
-    # by the separate solved-circulation error above.
-    independent_target_rhs = A * target_gamma
-    circulation_residual = norm(A * wing.sol["Gamma"] - independent_target_rhs) /
-                           max(norm(independent_target_rhs), eps())
+    vlm.solve(system, Vinf; t=T, extraVinf=mms_extraVinf, keep_sol=true,
+              vortexsheet=(X,t)->zeros(3))
+    rhs_modified = rhs .+ manufactured_rhs
+    circulation_residual = norm(A * wing.sol["Gamma"] - rhs_modified) /
+                           max(norm(rhs_modified), eps())
     circulation_target_error = norm(wing.sol["Gamma"] - target_gamma) /
                                max(norm(target_gamma), eps())
 
@@ -208,12 +187,11 @@ function solve_mms_target_aerodynamics!(PFIELD, T, DT)
     area = max(span*root_chord,1e-16)
     numeric_count = vpm.get_np(PFIELD)
     numeric_dynamic_slots = [i for i in 1:numeric_count if !vpm.is_static(vpm.get_particle(PFIELD, i))]
+    length(numeric_dynamic_slots) == length(mms_target.ids) || error(
+        "fixed-population MMS requires exactly $(length(mms_target.ids)) numerical dynamic particles; " *
+        "found $(length(numeric_dynamic_slots))")
     numeric_start = Int(mms_target_start[])
-    target_slots = collect(numeric_start:(numeric_start + length(mms_target.ids) - 1))
-    length(numeric_dynamic_slots) >= length(target_slots) || error(
-        "fixed-population MMS target particles are missing: expected $(length(target_slots)), " *
-        "found $(length(numeric_dynamic_slots)) dynamic particles")
-    numeric_dynamic_slots[1:length(target_slots)] == target_slots ||
+    numeric_dynamic_slots == collect(numeric_start:(numeric_start + length(mms_target.ids) - 1)) ||
         error("numerical MMS particles no longer match the immutable target ID ordering")
     numeric_X = zeros(length(mms_target.ids),3)
     numeric_G = similar(numeric_X)
@@ -224,15 +202,12 @@ function solve_mms_target_aerodynamics!(PFIELD, T, DT)
         numeric_G[i,:] .= vpm.get_Gamma(part)
         numeric_S[i] = vpm.get_sigma(part)[]
     end
-    # JSON.jl serializes Julia matrices as their column vectors. Transpose the
-    # particle-by-component arrays so the wire representation is one row per
-    # particle, matching the manifest and Python's (n_particle, 3) schema.
-    numerical_state = Dict("position"=>permutedims(numeric_X),
-                           "circulation"=>permutedims(numeric_G), "core"=>numeric_S)
-    target_state = Dict("position"=>permutedims(Xh),
-                        "circulation"=>permutedims(Gh), "core"=>Sh)
+    numerical_state = Dict("position"=>numeric_X, "circulation"=>numeric_G, "core"=>numeric_S)
+    target_state = Dict("position"=>Xh, "circulation"=>Gh, "core"=>Sh)
     particle_error = Dict("position_l2"=>norm(numeric_X-Xh), "circulation_l2"=>norm(numeric_G-Gh),
                           "core_l2"=>norm(numeric_S-Sh))
+    grid = [Float64[0.0,0.25span,0.0], Float64[0.75root_chord,0.5span,0.1root_chord],
+            Float64[1.5root_chord,0.75span,0.0]]
     num_probe_velocity, num_probe_vorticity = mms_probe_fields(PFIELD, grid, T, DT)
     tar_probe_velocity, tar_probe_vorticity = mms_probe_fields(target_pf, grid, T, DT)
     num_vel, tar_vel = num_probe_velocity, tar_probe_velocity
@@ -242,7 +217,7 @@ function solve_mms_target_aerodynamics!(PFIELD, T, DT)
         "le" => [[Float64(wing._xlwingdcr[i]),Float64(wing._ywingdcr[i]),Float64(wing._zlwingdcr[i])] for i in eachindex(wing._xlwingdcr)],
         "te" => [[Float64(wing._xtwingdcr[i]),Float64(wing._ywingdcr[i]),Float64(wing._ztwingdcr[i])] for i in eachindex(wing._xtwingdcr)],
     )
-    return target_gamma, permutedims(fmat), lift/(qinf*area), drag/(qinf*area), circulation_residual,
+    return target_gamma, fmat, lift/(qinf*area), drag/(qinf*area), circulation_residual,
            circulation_target_error, Float64.(wing.sol["Gamma"]),
            target_state, numerical_state, particle_error, grid_velocity_error, target_geometry,
            grid, tar_probe_velocity, num_probe_velocity, tar_probe_vorticity, num_probe_vorticity
@@ -409,19 +384,14 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
 
     target_payload = Dict{String,Any}()
     if mms_target_enabled
-        # The callback exchanges the load used by the structural step ending
-        # at T + DT. Keep the MMS force and its reported physical clock at
-        # that same force-exchange time (the callback's FLOWUnsteady T is the
-        # beginning of the fluid interval).
-        force_time = Float64(T + DT)
         target_gamma, target_force, target_cl, target_cd, target_residual,
             target_gamma_error, target_vlm_gamma,
             target_particle_state, numerical_particle_state, particle_error, grid_velocity_error,
             target_geometry, probe_positions, target_probe_velocity, numerical_probe_velocity,
             target_probe_vorticity, numerical_probe_vorticity =
-            solve_mms_target_aerodynamics!(PFIELD, force_time, Float64(DT))
+            solve_mms_target_aerodynamics!(PFIELD, Float64(T), Float64(DT))
         target_q = [structural_state(mms_target, 0.75*Float64(mms_target.data["chord"]),
-                       Float64(y), force_time)[1] for y in mms_target.data["y_stations"]]
+                       Float64(y), Float64(T))[1] for y in mms_target.data["y_stations"]]
     target_payload = Dict(
             "target_particle_ids" => mms_target.ids,
             "numerical_particle_ids" => mms_target.ids,
@@ -457,7 +427,7 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
 
     trace_record = Dict(
             "step" => step,
-            "fluid_time_s" => Float64(T + (mms_target_enabled ? DT : 0.0)),
+            "fluid_time_s" => Float64(T),
             "dt" => Float64(DT),
             "n_span" => m_span,
             "n_chord" => 1,
@@ -494,7 +464,7 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
 
     socket_record = Dict(
         "step" => step,
-        "fluid_time_s" => Float64(T + (mms_target_enabled ? DT : 0.0)),
+        "fluid_time_s" => Float64(T),
         "n_span" => m_span,
         "n_chord" => 1,
         "indexing" => "span-major",

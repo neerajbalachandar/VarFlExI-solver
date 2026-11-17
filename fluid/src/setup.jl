@@ -207,7 +207,7 @@ wake_treatment_sphere = uns.remove_particles_sphere(
 if mms_target_enabled
     # The coupled target defines a fixed particle population. Shedding and
     # pruning are intentionally excluded and recorded in run provenance.
-    wake_treatment = (args...; kwargs...) -> false # Changed here for mms correction
+    wake_treatment = (args...; kwargs...) -> nothing
 else
     wake_treatment = uns.concatenate(
         wake_treatment_sphere,

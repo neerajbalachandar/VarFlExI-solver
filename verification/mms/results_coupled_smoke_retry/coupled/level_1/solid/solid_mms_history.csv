@@ -1,1 +1,0 @@
-step,time_s,target_force,numerical_force,target_state,numerical_state,state_error_l2_coefficient_diagnostic,source_l2,e_u0,e_v0,e_w,e_theta_x,e_theta_y,source_evaluation_time_s,t_alpha_m_s,t_alpha_f_s,dt_s,alpha_m,alpha_f,gamma,beta,q_alpha_f_coefficients,v_alpha_f_coefficients,a_alpha_m_coefficients
