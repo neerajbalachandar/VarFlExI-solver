@@ -2,6 +2,7 @@
 # Geometry fields are read from the production config files at run time.
 config_dir: config
 output_dir: verification/mms_2/results
+analytical_reference_time_s: 0.05
 
 target:
   amplitude: 0.02        # m^2/s for vector-potential scale
@@ -35,14 +36,17 @@ particles:
   lambda_sigma: 2.0
   core_grid_intervals_minimum: 8
   fixed_population_controls:
-    # These are required for a future field-MMS production case. They are not
-    # applied by this tree because the continuum source projection is absent.
+    # Mirrored in fluid_mms_config.yaml; fluid/src/FluidConfig.jl and
+    # fluid/src/setup.jl map these settings into the production runtime.
+    particles_per_step: 0
     start_with_wake: false
-    unsteady_shedding: false
-    boundary_layer_shedding: false
-    particle_pruning: false
+    unsteady: false
+    wake_coupled: false
+    shed_boundarylayer: false
+    pruning_thresholds_configured_as_noop: true
   record_count_at_every_step: true
   fail_if_count_changes: true
+  identity_audit_required: true
 
 reconstruction:
   # One fixed box for all levels. Domain extent includes the wing and a broad
@@ -58,6 +62,10 @@ reconstruction:
   sensitivity_level: 1
   sensitivity_factor: 2
   sensitivity_relative_tolerance: 0.01
+  sensitivity_norm_floor: 1.0e-14
+  # A hard safety cap prevents accidental OOM; the entry point fails without
+  # silently reducing the spacing derived from sigma and target scale.
+  maximum_grid_points: 2000000
   core_support_radii: 4.0
   minimum_boundary_clearance_core_radii: 2.0
   # Smallest localized target scale imposes another spacing limit.

@@ -53,12 +53,15 @@ function load_complete_particle_snapshot!(pfield, snapshot::Int, manifest)
     first(findall(==("dynamic"), roles)) == 1 || error("Dynamic population must be loaded first")
 
     loaded = Dict{String,Int}()
+    snapshot_times = Float64[]
     for (i, entry) in enumerate(entries)
         filepath = files[i]
-        hdf5_count = vpm.HDF5.h5open(filepath, "r") do h5
+        snapshot_metadata = vpm.HDF5.h5open(filepath, "r") do h5
             "np" in keys(h5) || error("Snapshot $filepath has no saved particle-count metadata")
-            Int(vpm.HDF5.read(h5["np"]))
+            "t" in keys(h5) || error("Snapshot $filepath has no saved physical-time metadata")
+            (count=Int(vpm.HDF5.read(h5["np"])), time=Float64(vpm.HDF5.read(h5["t"])))
         end
+        hdf5_count = snapshot_metadata.count
         hdf5_count == Int(entry["saved_metadata_count"]) || error(
             "Snapshot metadata for $(entry["name"]) reports $hdf5_count particles, " *
             "manifest says $(entry["saved_metadata_count"])" )
@@ -74,14 +77,28 @@ function load_complete_particle_snapshot!(pfield, snapshot::Int, manifest)
         all(j -> vpm.is_static(vpm.get_particle(pfield, j)) == expected_static, slots) || error(
             "Particle static flags disagree with role $(roles[i]) for $(entry["name"])")
         loaded[names[i]] = actual_count
+        loaded[names[i]] == hdf5_count || error("Loaded and saved counts differ for $(names[i])")
+        push!(snapshot_times, snapshot_metadata.time)
     end
     n_dynamic = sum(loaded[names[i]] for i in eachindex(names) if roles[i] == "dynamic")
     n_static = sum(loaded[names[i]] for i in eachindex(names) if roles[i] == "static")
     n_dynamic + n_static == vpm.get_np(pfield) || error("Population manifest does not account for every loaded particle")
+    length(snapshot_times) == length(entries) || error("Not all population snapshots supplied a physical time")
+    all(isapprox(snapshot_times[1], t; rtol=0, atol=1e-12) for t in snapshot_times) ||
+        error("Dynamic and static snapshots have different physical times: $snapshot_times")
+    if haskey(manifest, "physical_time_s")
+        isapprox(Float64(manifest["physical_time_s"]), snapshot_times[1]; rtol=0, atol=1e-12) ||
+            error("Manifest physical time disagrees with saved snapshot metadata")
+    end
+    if haskey(manifest, "snapshot")
+        Int(manifest["snapshot"]) == snapshot || error("Manifest snapshot number disagrees with requested snapshot")
+    end
     return Dict("snapshot"=>snapshot, "populations"=>loaded,
                 "particle_counts"=>Dict("dynamic"=>n_dynamic,"static_or_bound"=>n_static,
                                         "total"=>n_dynamic+n_static),
-                "population_names"=>names, "source_files"=>files)
+                "population_names"=>names, "source_files"=>files,
+                "physical_time_s"=>snapshot_times[1],
+                "actual_loaded_counts"=>copy(loaded))
 end
 
 function assert_fixed_population_count(population_audit, observed_count::Integer, time_s::Real)
@@ -106,6 +123,53 @@ function audit_fixed_population_history(population_audit, observations)
              Int(row["particle_count"]), Float64(row["time_s"])) for row in observations]
     return Dict("status"=>"PASS", "steps_checked"=>length(rows), "steps"=>rows,
                 "constant_count"=>true)
+end
+
+"""Fail-closed lifecycle/identity audit for caller-supplied per-step records.
+
+Each row must provide `step`, `time_s`, `particles` (records with persistent
+`id` and `role`), plus `creation_events`, `removal_events`, and
+`role_change_events` arrays. The current production snapshot format does not
+provide these records, so a single-snapshot reconstruction cannot call this
+function successfully or claim identity preservation.
+"""
+function audit_population_identity_history(population_audit, observations)
+    isempty(observations) && error("Particle identity history is required")
+    first_ids = nothing
+    first_roles = nothing
+    results = Any[]
+    previous_step = nothing
+    previous_time = nothing
+    expected_total = Int(population_audit["particle_counts"]["total"])
+    for row in observations
+        for key in ("step", "time_s", "particles", "creation_events", "removal_events", "role_change_events")
+            haskey(row, key) || error("Identity audit row is missing '$key'")
+        end
+        step, time_s = Int(row["step"]), Float64(row["time_s"])
+        isfinite(time_s) || error("Identity audit time must be finite")
+        previous_step === nothing || step == previous_step + 1 || error("Identity audit steps must be consecutive")
+        previous_time === nothing || time_s > previous_time || error("Identity audit times must increase")
+        isempty(row["creation_events"]) || error("Unexpected particle creation at step $step")
+        isempty(row["removal_events"]) || error("Unexpected particle removal at step $step")
+        isempty(row["role_change_events"]) || error("Unexpected particle role change at step $step")
+        particles = collect(row["particles"])
+        length(particles) == expected_total || error("Identity record count disagrees with complete snapshot population")
+        ids = [String(p["id"]) for p in particles]
+        length(unique(ids)) == length(ids) || error("Duplicate persistent particle identifier at step $step")
+        roles = Dict(String(p["id"])=>String(p["role"]) for p in particles)
+        all(role in ("dynamic", "static") for role in values(roles)) || error("Unexpected particle role at step $step")
+        if first_ids === nothing
+            first_ids = Set(ids)
+            first_roles = roles
+        else
+            Set(ids) == first_ids || error("Particle identity membership changed at step $step")
+            roles == first_roles || error("Particle dynamic/static role changed at step $step")
+        end
+        push!(results, Dict("step"=>step, "time_s"=>time_s, "particle_count"=>length(ids), "status"=>"PASS"))
+        previous_step, previous_time = step, time_s
+    end
+    return Dict("status"=>"PASS", "steps_checked"=>length(results), "steps"=>results,
+                "unique_particle_ids"=>length(first_ids), "lifecycle_events_absent"=>true)
 end
 
 function particle_envelope(pfield)
@@ -185,6 +249,8 @@ function reconstruct_complete_field!(pfield, grid;
         "($(info.sigma_min) m; require $core_intervals_minimum intervals) and target scale " *
         "($(target_length_scale_m) m; require $target_intervals_minimum intervals); " *
         "maximum allowed spacing is $max_spacing m")
+    # FLOWVPM's Gaussian-erf kernel has no finite support. This is an explicit
+    # N-sigma truncation envelope used only for domain-clearance checks.
     support_min = info.minimum .- core_support_radii * info.sigma_max
     support_max = info.maximum .+ core_support_radii * info.sigma_max
     clearance = min.(support_min .- grid_min, grid_max .- support_max)
@@ -221,14 +287,25 @@ function reconstruct_complete_field!(pfield, grid;
                                   "static_or_bound"=>info.static,
                                   "manifest_populations"=>population_audit["populations"]),
         "particle_core_m" => Dict("minimum"=>info.sigma_min, "maximum"=>info.sigma_max,
-                                  "mean"=>info.sigma_mean),
+                                  "mean"=>info.sigma_mean,
+                                  "sigma_definition"=>"FLOWVPM smoothing-radius parameter; for the default Gaussian-erf kernel it is the Gaussian radial scale (kernel uses r/sigma), not a finite physical diameter or hard support radius"),
+        "sigma_min"=>info.sigma_min, "sigma_max"=>info.sigma_max,
+        "sigma_mean"=>info.sigma_mean,
         "particle_position_min_m"=>info.minimum,
         "particle_position_max_m"=>info.maximum,
-        "particle_core_support_bounds_m"=>Dict("minimum"=>support_min, "maximum"=>support_max),
+        "particle_core_truncation_envelope_bounds_m"=>Dict("minimum"=>support_min, "maximum"=>support_max),
+        "core_truncation_envelope_sigma_factor"=>core_support_radii,
+        "core_truncation_envelope_is_hard_support"=>false,
         "boundary_clearance_m"=>clearance,
         "grid_min_m"=>grid_min, "grid_max_m"=>grid_max,
         "grid_points"=>grid.nnodes,
         "grid_cells"=>Int.(grid.NDIVS), "grid_spacing_m"=>grid_spacing,
+        "grid_spacing_x_m"=>grid_spacing[1], "grid_spacing_y_m"=>grid_spacing[2],
+        "grid_spacing_z_m"=>grid_spacing[3],
+        "intervals_per_minimum_sigma"=>info.sigma_min ./ grid_spacing,
+        "intervals_per_minimum_core"=>info.sigma_min ./ grid_spacing,
+        "intervals_per_target_scale"=>target_length_scale_m ./ grid_spacing,
+        "core_resolution_convention"=>"intervals are measured per FLOWVPM sigma Gaussian radial scale for the default Gaussian-erf kernel; no hard core diameter is assumed",
         "core_intervals_minimum"=>core_intervals_minimum,
         "target_length_scale_m"=>target_length_scale_m,
         "target_intervals_minimum"=>target_intervals_minimum,
@@ -247,11 +324,28 @@ function reconstruct_complete_field!(pfield, grid;
 end
 
 """Match saved Python known-point coordinates to actual GeometricTools nodes."""
-function verify_python_coordinate_samples(grid, samples; atol=1e-12)
+function verify_python_coordinate_samples(grid, reference; atol=1e-12)
+    haskey(reference, "samples") && haskey(reference, "bounds_m") &&
+        haskey(reference, "cell_counts") || error("Python coordinate reference metadata is incomplete")
+    expected_min = Float64.([reference["bounds_m"][d][1] for d in 1:3])
+    expected_max = Float64.([reference["bounds_m"][d][2] for d in 1:3])
+    expected_cells = Int.(reference["cell_counts"])
+    length(expected_cells) == 3 && Int.(grid.NDIVS) == expected_cells ||
+        error("Python/Julia reconstruction grid dimensions differ")
+    isapprox(Float64.(grid.P_min), expected_min; rtol=0, atol=atol) &&
+        isapprox(Float64.(grid.P_max), expected_max; rtol=0, atol=atol) ||
+        error("Python/Julia reconstruction domains differ")
+
+    samples = reference["samples"]
     checked = 0
+    seen = Set{Int}()
+    sampled_indices = Vector{NTuple{3,Int}}()
     for sample in samples
-        index = Int(sample["flat_index_geometrictools_columnmajor"]) + 1
+        flat0 = Int(sample["flat_index_geometrictools_columnmajor"])
+        index = flat0 + 1
         1 <= index <= grid.nnodes || error("Python sample node index is outside Julia grid")
+        flat0 in seen && error("Python coordinate samples contain duplicate flattened indices")
+        push!(seen, flat0)
         expected = Float64.(sample["xyz_m"])
         actual = Float64.(grid.nodes[:, index])
         length(expected) == 3 && maximum(abs.(expected .- actual)) <= atol || error(
@@ -263,18 +357,37 @@ function verify_python_coordinate_samples(grid, samples; atol=1e-12)
             error("Python known-value mapping probe must be a finite 3-vector")
         maximum(abs.(expected_probe .- actual_probe)) <= atol || error(
             "Python/Julia analytical value or component-order mismatch at flattened index $(index-1)")
+        dims = Int.(grid.NDIVS) .+ 1
+        i0 = (flat0 % dims[1], (flat0 ÷ dims[1]) % dims[2], flat0 ÷ (dims[1]*dims[2]))
+        push!(sampled_indices, i0)
         checked += 1
     end
     checked > 0 || error("No Python coordinate samples were supplied for cross-language check")
+    if Bool(get(reference, "exact_all_node_check", false))
+        checked == grid.nnodes && length(seen) == grid.nnodes ||
+            error("Exact Python/Julia coordinate check did not cover every node")
+    else
+        dims = Int.(grid.NDIVS) .+ 1
+        for axis in 1:3
+            values = unique([index[axis] for index in sampled_indices])
+            length(values) >= 5 && minimum(values) == 0 && maximum(values) == dims[axis]-1 ||
+                error("Python/Julia samples do not span axis $axis and both grid boundaries")
+        end
+    end
     return Dict("status"=>"PASS", "points_compared"=>checked,
+                "grid_points_total"=>grid.nnodes,
+                "exact_all_node_check"=>Bool(get(reference, "exact_all_node_check", false)),
                 "coordinate_order"=>"x,y,z; GeometricTools column-major, first coordinate fastest")
 end
 
 """Compare same particle field on nested Cartesian grids at common nodes."""
-function compare_nested_grid_fields(coarse, fine, factor::Int; relative_tolerance=0.01)
+function compare_nested_grid_fields(coarse, fine, factor::Int;
+        freestream, relative_tolerance=0.01, norm_floor=1.0e-14)
     factor > 1 || error("Grid sensitivity factor must exceed one")
     isfinite(relative_tolerance) && relative_tolerance > 0 ||
         error("Grid sensitivity tolerance must be finite and positive")
+    isfinite(norm_floor) && norm_floor > 0 ||
+        error("Grid sensitivity norm floor must be finite and positive")
     coarse.P_min == fine.P_min && coarse.P_max == fine.P_max ||
         error("Grid-sensitivity grids must cover the identical physical box")
     Int.(fine.NDIVS) == factor .* Int.(coarse.NDIVS) ||
@@ -284,12 +397,16 @@ function compare_nested_grid_fields(coarse, fine, factor::Int; relative_toleranc
     fine_linear = LinearIndices(fine_dims)
     spacing = (Float64.(coarse.P_max) .- Float64.(coarse.P_min)) ./ Float64.(coarse.NDIVS)
     weights_sum = 0.0
+    fields = ("U", "U_induced", "Wapprox")
     accum = Dict(name => Dict("difference2"=>0.0,"reference2"=>0.0,"max_abs"=>0.0)
-                 for name in ("U", "Wapprox"))
+                 for name in fields)
     all(name -> name in keys(coarse.field), ("U", "Wapprox")) ||
         error("Nominal grid is missing U or Wapprox")
     all(name -> name in keys(fine.field), ("U", "Wapprox")) ||
         error("Refined grid is missing U or Wapprox")
+    common_fs = Float64.(freestream)
+    length(common_fs) == 3 && all(isfinite, common_fs) ||
+        error("Sensitivity comparison requires one finite common freestream vector")
     for I in CartesianIndices(coarse_dims)
         fine_I = ((I[1]-1)*factor+1, (I[2]-1)*factor+1, (I[3]-1)*factor+1)
         ic = LinearIndices(coarse_dims)[I]
@@ -302,47 +419,61 @@ function compare_nested_grid_fields(coarse, fine, factor::Int; relative_toleranc
                  (I[2] in (1,coarse_dims[2]) ? 0.5 : 1.0) *
                  (I[3] in (1,coarse_dims[3]) ? 0.5 : 1.0)
         weights_sum += weight
-        for name in ("U", "Wapprox")
-            c = coarse.field[name]["field_data"][:,ic]
-            f = fine.field[name]["field_data"][:,jf]
+        for name in fields
+            c = name == "U_induced" ? coarse.field["U"]["field_data"][:,ic] .- common_fs :
+                                      coarse.field[name]["field_data"][:,ic]
+            f = name == "U_induced" ? fine.field["U"]["field_data"][:,jf] .- common_fs :
+                                      fine.field[name]["field_data"][:,jf]
             all(isfinite,c) && all(isfinite,f) || error("Non-finite $name in grid sensitivity comparison")
             d = f .- c
             accum[name]["difference2"] += weight * sum(abs2,d)
-            accum[name]["reference2"] += weight * sum(abs2,c)
+            accum[name]["reference2"] += weight * sum(abs2,f)
             accum[name]["max_abs"] = max(accum[name]["max_abs"], maximum(abs.(d)))
         end
     end
     metrics = Dict{String,Any}()
-    for name in ("U", "Wapprox")
+    for name in fields
         ref2 = accum[name]["reference2"]
-        ref2 > eps() || error("Cannot normalize $name grid sensitivity by a near-zero field")
+        sqrt(ref2) > norm_floor || error(
+            "Cannot normalize $name grid sensitivity: fine-field norm $(sqrt(ref2)) " *
+            "does not exceed norm floor $norm_floor")
         relative = sqrt(accum[name]["difference2"]/ref2)
         metrics[name] = Dict("relative_l2"=>relative,
                              "absolute_l2"=>sqrt(accum[name]["difference2"]),
                              "reference_l2"=>sqrt(ref2), "max_absolute"=>accum[name]["max_abs"],
+                             "normalization_field"=>"fine reconstruction",
+                             "norm_floor"=>norm_floor,
                              "relative_tolerance"=>relative_tolerance,
                              "status"=>relative <= relative_tolerance ? "PASS" : "FAIL")
     end
-    all(value["status"] == "PASS" for value in values(metrics)) || error(
-        "Reconstruction-grid sensitivity exceeds tolerance: $metrics")
+    primary_fields = ("U_induced", "Wapprox")
+    primary_pass = all(metrics[name]["status"] == "PASS" for name in primary_fields)
     return Dict("common_nodes"=>coarse.nnodes, "domain_min_m"=>coarse.P_min,
                 "domain_max_m"=>coarse.P_max, "factor"=>factor,
                 "coarse_cells"=>coarse.NDIVS, "fine_cells"=>fine.NDIVS,
                 "coarse_spacing_m"=>spacing, "fine_spacing_m"=>spacing ./ factor,
-                "common_domain_weight_sum_m3"=>weights_sum, "fields"=>metrics)
+                "common_domain_weight_sum_m3"=>weights_sum, "fields"=>metrics,
+                "primary_sensitivity_fields"=>collect(primary_fields),
+                "norm_floor"=>norm_floor,
+                "status"=>primary_pass ? "PASS" : "FAIL")
 end
 
 function run_reconstruction_sensitivity!(pfield, coarse, fine;
         sensitivity_level::Int, sensitivity_factor::Int,
-        sensitivity_relative_tolerance::Real, coarse_coordinate_reference,
-        fine_coordinate_reference, kwargs...)
+        sensitivity_relative_tolerance::Real, sensitivity_norm_floor::Real,
+        coarse_coordinate_reference,
+        fine_coordinate_reference, expected_freestream, kwargs...)
     sensitivity_level > 0 || error("sensitivity_level must be positive")
     coarse_metadata = reconstruct_complete_field!(pfield, coarse;
-        coordinate_reference=coarse_coordinate_reference, kwargs...)
+        coordinate_reference=coarse_coordinate_reference,
+        expected_freestream=expected_freestream, kwargs...)
     fine_metadata = reconstruct_complete_field!(pfield, fine;
-        coordinate_reference=fine_coordinate_reference, kwargs...)
+        coordinate_reference=fine_coordinate_reference,
+        expected_freestream=expected_freestream, kwargs...)
     comparison = compare_nested_grid_fields(coarse, fine, sensitivity_factor;
-        relative_tolerance=sensitivity_relative_tolerance)
+        freestream=expected_freestream,
+        relative_tolerance=sensitivity_relative_tolerance,
+        norm_floor=sensitivity_norm_floor)
     return Dict("sensitivity_level"=>sensitivity_level,
                 "sensitivity_factor"=>sensitivity_factor,
                 "nominal_metadata"=>coarse_metadata, "refined_metadata"=>fine_metadata,

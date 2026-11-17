@@ -18,13 +18,14 @@ run_python() {
 
 usage() {
     cat <<'EOF'
-Usage: verification/mms_2/run_pipeline.sh [preflight|structural|fluid|coupled|particle-discrete]
+Usage: verification/mms_2/run_pipeline.sh [preflight|structural|fluid|coupled|particle-discrete|reconstruct-snapshot]
 
   preflight          Symbolic target, norms, refinement and physics-config checks only
   structural         Copied standalone structural MMS
   fluid              Velocity-vorticity field MMS (currently fail-closed pending source projection)
   coupled            Coupled field MMS (currently fail-closed pending source projection)
   particle-discrete  Retained fixed-population particle-ODE MMS from the baseline
+  reconstruct-snapshot Reconstruct one complete saved particle snapshot (requires --manifest, --snapshot)
 
 No mode in this script is run as part of implementation. Fluid and coupled
 field solves require the full-state source projection described in the README.
@@ -34,7 +35,7 @@ EOF
 mode="${1:-preflight}"
 case "$mode" in
     -h|--help|help) usage; exit 0 ;;
-    preflight|structural|fluid|coupled|particle-discrete) ;;
+    preflight|structural|fluid|coupled|particle-discrete|reconstruct-snapshot) ;;
     *) usage >&2; exit 2 ;;
 esac
 

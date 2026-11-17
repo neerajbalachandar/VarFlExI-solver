@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -29,7 +31,10 @@ def production_config(config_dir: Path) -> tuple[dict, dict]:
 
 def run_preflight(config_dir: Path, out: Path) -> dict:
     fluid, solid = production_config(config_dir)
-    expected = yaml.safe_load((HERE / "field_mms_parameters.yaml").read_text(encoding="utf-8"))["physics"]
+    field_config = yaml.safe_load((HERE / "field_mms_parameters.yaml").read_text(encoding="utf-8"))
+    isolated_fluid_path = HERE / "fluid_mms_config.yaml"
+    isolated_fluid = yaml.safe_load(isolated_fluid_path.read_text(encoding="utf-8"))
+    expected = field_config["physics"]
     actual_viscous = str(fluid.get("viscous_scheme", "CoreSpreading")).strip().lower()
     actual_sfs = str(fluid.get("vpm_sfs", "none")).strip().lower()
     viscous_off = actual_viscous in ("none", "off", "false", "nothing")
@@ -53,19 +58,52 @@ def run_preflight(config_dir: Path, out: Path) -> dict:
         "effective_runtime_types_are_checked_by": "reconstruct_fields.jl",
         "expected_viscous_scheme": expected["viscous_scheme"],
         "expected_vpm_sfs": expected["vpm_sfs"],
+        "isolated_mms_fluid_config": str(isolated_fluid_path.resolve()),
         "fixed_particle_lifecycle": {
-            "status": "NOT_CONFIGURED_OR_AUDITED_BY_MMS_2_DRIVER",
-            "reason": "The continuum field source projection is unresolved; production shedding and pruning controls are not overridden here.",
-            "required_controls_for_future_field_case": yaml.safe_load(
-                (HERE / "field_mms_parameters.yaml").read_text(encoding="utf-8"))[
-                    "particles"]["fixed_population_controls"],
+            "status": "CONFIGURED_NOT_RUNTIME_AUDITED",
+            "runtime_mapping": {
+                "particles_per_step": "FluidConfig.jl p_per_step -> setup.jl shedding rate",
+                "start_with_wake": "FluidConfig.jl shed_starting -> setup.jl starting wake",
+                "unsteady": "FluidConfig.jl shed_unsteady -> setup.jl unsteady shedding",
+                "wake_coupled": "FluidConfig.jl -> setup.jl wake coupling",
+                "shed_boundarylayer": "FluidConfig.jl -> setup.jl boundary-layer shedding",
+                "pruning_thresholds": "setup.jl remove_particles_strength/sigma/sphere predicates",
+            },
+            "configured_controls": field_config["particles"]["fixed_population_controls"],
+            "isolated_config_values": {key: isolated_fluid[key] for key in (
+                "particles_per_step", "start_with_wake", "unsteady", "wake_coupled",
+                "shed_boundarylayer", "remove_every", "sphere_factor",
+                "strength_min_factor", "strength_max_factor", "sigma_min_factor",
+                "sigma_max_factor")},
+            "pruning_behavior": (
+                "Very broad finite thresholds make the production removal predicates no-ops "
+                "for finite MMS state values. The solver has no explicit pruning disable flag; "
+                "this remains subject to runtime population auditing."),
+            "separate_fluid_config_supported_by_cli": True,
+            "count_and_identity_audit": "single-snapshot counts/roles only; lifecycle event history is unavailable",
             "count_audit_helper": "reconstruct_fields.jl:audit_fixed_population_history",
         },
     }
-    if not (viscous_off and sfs_off):
+    fixed_controls_ok = (
+        int(isolated_fluid["particles_per_step"]) == 0
+        and isolated_fluid["start_with_wake"] is False
+        and isolated_fluid["unsteady"] is False
+        and isolated_fluid["wake_coupled"] is False
+        and isolated_fluid["shed_boundarylayer"] is False
+        and float(isolated_fluid["strength_min_factor"]) == 0.0
+        and float(isolated_fluid["sigma_min_factor"]) == 0.0
+        and float(isolated_fluid["sphere_factor"]) >= 1.0e50
+        and float(isolated_fluid["strength_max_factor"]) >= 1.0e50
+        and float(isolated_fluid["sigma_max_factor"]) >= 1.0e50
+        and str(isolated_fluid.get("viscous_scheme", "none")).strip().lower() == "none"
+        and str(isolated_fluid.get("vpm_sfs", "none")).strip().lower() == "none"
+    )
+    report["production_config_check"]["fixed_particle_lifecycle"]["configuration_check"] = (
+        "PASS" if fixed_controls_ok else "FAIL")
+    if not (viscous_off and sfs_off and fixed_controls_ok):
         report["status"] = "FAIL"
         report["production_config_check"]["reason"] = (
-            "Field MMS requires viscous_scheme=none and vpm_sfs=none")
+            "Field MMS requires viscosity/SFS off and all isolated fixed-population controls set")
     out.mkdir(parents=True, exist_ok=True)
     path = out / "analytical_preflight.json"
     path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
@@ -75,15 +113,57 @@ def run_preflight(config_dir: Path, out: Path) -> dict:
     return report
 
 
+def coordinate_reference(request_path: Path) -> dict:
+    """Generate Python coordinates and the production freestream at snapshot time."""
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    bounds = request["bounds_m"]
+    cells = [int(v) for v in request["cell_counts"]]
+    fluid = yaml.safe_load(Path(request["fluid_config"]).read_text(encoding="utf-8"))
+    gradient = fluid.get("freestream_gradient", [0.0] * 9)
+    wavenumber = fluid.get("freestream_wavenumber", [0.0] * 3)
+    if len(gradient) != 9 or len(wavenumber) != 3:
+        raise ValueError("Freestream gradient/wavenumber must have 9 and 3 entries")
+    if any(float(v) != 0.0 for v in gradient) or any(float(v) != 0.0 for v in wavenumber):
+        raise ValueError("Snapshot reconstruction requires a spatially uniform freestream")
+    from field_mms import coordinate_mapping_samples
+    reference = coordinate_mapping_samples(bounds, cells)
+    fs = configured_particle_freestream(fluid, float(request["time_s"]))
+    return {"coordinate_reference": reference, "freestream_m_s": fs.tolist(),
+            "physical_time_s": float(request["time_s"])}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("preflight", "structural", "fluid", "coupled", "particle-discrete"))
+    parser.add_argument("mode", choices=("preflight", "structural", "fluid", "coupled", "particle-discrete", "coordinate-reference", "reconstruct-snapshot"))
     parser.add_argument("--config-dir", type=Path, default=ROOT / "config")
-    parser.add_argument("--output-dir", type=Path, default=HERE / "results")
+    parser.add_argument("--output-dir", "--output", dest="output_dir", type=Path, default=HERE / "results")
+    parser.add_argument("--request", type=Path)
+    parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--snapshot", type=int)
+    parser.add_argument("--grid-config", type=Path, default=HERE / "field_mms_parameters.yaml")
     parser.add_argument("--study", choices=("spatial", "temporal", "both"), default="both")
     parser.add_argument("--levels", default="1,2,4")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+
+    if args.mode == "coordinate-reference":
+        if args.request is None:
+            parser.error("coordinate-reference requires --request")
+        print(json.dumps(coordinate_reference(args.request)))
+        return
+
+    if args.mode == "reconstruct-snapshot":
+        if args.manifest is None or args.snapshot is None:
+            parser.error("reconstruct-snapshot requires --manifest and --snapshot")
+        julia = os.environ.get("JULIA_BIN", str(HERE / "julia_with_openssl.sh"))
+        project = os.environ.get("FLOWUNSTEADY_PROJECT", str(ROOT.parent))
+        env = dict(os.environ, MMS2_PYTHON=sys.executable)
+        command = [julia, f"--project={project}", str(HERE / "reconstruct_snapshot.jl"),
+                   "--manifest", str(args.manifest.resolve()),
+                   "--snapshot", str(args.snapshot),
+                   "--grid-config", str(args.grid_config.resolve()),
+                   "--output", str(args.output_dir.resolve())]
+        raise SystemExit(subprocess.run(command, cwd=ROOT, env=env).returncode)
 
     if args.mode == "preflight":
         run_preflight(args.config_dir, args.output_dir / "fluid")
