@@ -1,0 +1,63 @@
+# Configuration for the continuum velocity-vorticity field MMS.
+# Geometry fields are read from the production config files at run time.
+config_dir: config
+output_dir: verification/mms_2/results
+
+target:
+  length: 0.96          # m; target-field wavelength scale
+  amplitude: 0.02        # m^2/s for vector-potential scale
+  frequency: 12.0       # rad/s; appreciable evolution over 0.05 s
+  phase: 0.37           # rad; avoids component degeneracy
+
+physics:
+  viscous_scheme: none
+  vpm_sfs: none
+  viscosity_m2_s: 0.0
+
+spatial_study:
+  dt_s: 0.00025
+  final_time_s: 0.05
+  cases:
+    - {level: 1, nx: 16, ny: 96, fluid_spanwise_stations: 96}
+    - {level: 2, nx: 32, ny: 192, fluid_spanwise_stations: 192}
+    - {level: 3, nx: 64, ny: 384, fluid_spanwise_stations: 384}
+
+temporal_study:
+  nx: 64
+  ny: 384
+  fluid_spanwise_stations: 384
+  dt_s: [0.001, 0.0005, 0.00025]
+  final_time: 0.05
+
+particles:
+  # Population and core-size are sourced from the case's actual production
+  # ParticleField; these are planning values, not inferred from VLM resolution.
+  lambda_sigma: 2.0
+  core_grid_intervals_minimum: 3
+
+reconstruction:
+  # One fixed box for all levels. Domain extent includes the wing and a broad
+  # wake region; runtime checks additionally require the actual particle/core
+  # envelope to remain inside it.
+  bounds:
+    - [-0.48, 0.72]
+    - [-0.24, 1.20]
+    - [-0.48, 0.48]
+  grid_resolution: derive_from_actual_particle_cores_and_target_scale
+  preflight_cells: [8, 8, 8]  # lightweight target-norm sampling; not a run grid
+  # Compare the representative spatial-level-1 case against doubled cells.
+  sensitivity_level: 1
+  sensitivity_factor: 2
+  core_support_radii: 4.0
+  minimum_boundary_clearance_core_radii: 2.0
+  # The target scale imposes a second spacing limit in addition to particle
+  # core resolution. Runtime case metadata records both bounds.
+  target_intervals_per_wavelength: 8
+
+studies:
+  structural:
+    spatial_levels: [1, 2, 4]
+    temporal_dts_s: [0.001, 0.0005, 0.00025]
+  coupled:
+    spatial_levels: [1, 2, 4]
+    temporal_dts_s: [0.001, 0.0005, 0.00025]

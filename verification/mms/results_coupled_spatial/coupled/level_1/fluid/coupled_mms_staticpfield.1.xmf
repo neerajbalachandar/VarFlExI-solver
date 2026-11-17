@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Xdmf xmlns:xi="http://www.w3.org/2001/XInclude" Version="3.0">
+	<Domain>
+		<Grid Name="particles" GridType="Uniform">
+				<Time Value="0.01" />
+				<Geometry Type="XYZ">
+					<DataItem DataType="Float" Dimensions="24 3" Format="HDF" Precision="8">coupled_mms_staticpfield.1.h5:X</DataItem>
+				</Geometry>
+				<Topology Dimensions="24" Type="Polyvertex"/>
+				<Attribute Center="Node" Name="Gamma" Type="Vector">
+					<DataItem DataType="Float" Dimensions="24 3" Format="HDF" Precision="8">coupled_mms_staticpfield.1.h5:Gamma</DataItem>
+				</Attribute>
+				<Attribute Center="Node" Name="velocity" Type="Vector">
+					<DataItem DataType="Float" Dimensions="24 3" Format="HDF" Precision="8">coupled_mms_staticpfield.1.h5:velocity</DataItem>
+				</Attribute>
+				<Attribute Center="Node" Name="velocity gradient x" Type="Vector">
+					<DataItem DataType="Float" Dimensions="24 3" Format="HDF" Precision="8">coupled_mms_staticpfield.1.h5:velocity_gradient_x</DataItem>
+				</Attribute>
+				<Attribute Center="Node" Name="velocity gradient y" Type="Vector">
+					<DataItem DataType="Float" Dimensions="24 3" Format="HDF" Precision="8">coupled_mms_staticpfield.1.h5:velocity_gradient_y</DataItem>
+				</Attribute>
+				<Attribute Center="Node" Name="velocity gradient z" Type="Vector">
+					<DataItem DataType="Float" Dimensions="24 3" Format="HDF" Precision="8">coupled_mms_staticpfield.1.h5:velocity_gradient_z</DataItem>
+				</Attribute>
+				<Attribute Center="Node" Name="vorticity" Type="Vector">
+					<DataItem DataType="Float" Dimensions="24 3" Format="HDF" Precision="8">coupled_mms_staticpfield.1.h5:vorticity</DataItem>
+				</Attribute>
+				<Attribute Center="Node" Name="sigma" Type="Scalar">
+					<DataItem DataType="Float" Dimensions="24" Format="HDF" Precision="8">coupled_mms_staticpfield.1.h5:sigma</DataItem>
+				</Attribute>
+				<Attribute Center="Node" Name="circulation" Type="Scalar">
+					<DataItem DataType="Float" Dimensions="24" Format="HDF" Precision="8">coupled_mms_staticpfield.1.h5:circulation</DataItem>
+				</Attribute>
+				<Attribute Center="Node" Name="vol" Type="Scalar">
+					<DataItem DataType="Float" Dimensions="24" Format="HDF" Precision="8">coupled_mms_staticpfield.1.h5:vol</DataItem>
+				</Attribute>
+				<Attribute Center="Node" Name="static" Type="Scalar">
+					<DataItem DataType="Int" Dimensions="24" Format="HDF" Precision="8">coupled_mms_staticpfield.1.h5:static</DataItem>
+				</Attribute>
+		</Grid>
+	</Domain>
+</Xdmf>

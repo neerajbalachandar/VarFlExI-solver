@@ -960,7 +960,8 @@ import json
 
 
 def build_mms_manifest(solid: dict, fluid: dict, coupling: dict,
-                        mms_params: dict, refinement_level: int = 1) -> dict:
+                        mms_params: dict, refinement_level: int = 1,
+                        n_span: Optional[int] = None) -> dict:
     """Build the JSON manifest shared between Python and Julia processes.
 
     Parameters
@@ -968,6 +969,7 @@ def build_mms_manifest(solid: dict, fluid: dict, coupling: dict,
     solid, fluid, coupling : production config dicts.
     mms_params : mms_parameters.yaml as a dict.
     refinement_level : spatial refinement factor (1 = coarsest).
+    n_span : explicit spanwise station count for coupled mesh overlays.
     """
     Lx = float(solid["root_chord"])
     Ly = float(solid["span"])
@@ -982,7 +984,12 @@ def build_mms_manifest(solid: dict, fluid: dict, coupling: dict,
     }
     structural = StructuralTarget(Lx, Ly, components)
 
-    n_span = int(coupling.get("comm_nspan", fluid.get("n_span", 80))) * refinement_level
+    if n_span is None:
+        n_span = int(coupling.get("comm_nspan", fluid.get("n_span", 80))) * refinement_level
+    else:
+        n_span = int(n_span)
+        if n_span < 1:
+            raise ValueError("n_span must be positive")
     y_stations = (np.arange(n_span) + 0.5) / n_span * Ly
 
     x_bound = float(mms_params.get("x_bound_fraction", 0.25)) * Lx

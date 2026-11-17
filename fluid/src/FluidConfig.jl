@@ -29,14 +29,25 @@ end
 function load_simple_yaml(path::AbstractString)
     isfile(path) || error("Config file not found: $(path)")
     out = Dict{String, Any}()
+    sequence_key = nothing
     for line in eachline(path)
         stripped = strip(line)
         (isempty(stripped) || startswith(stripped, "#")) && continue
+        if sequence_key !== nothing && startswith(stripped, "- ")
+            push!(out[sequence_key], parse_scalar(strip(stripped[3:end])))
+            continue
+        end
         parts = split(line, ":"; limit=2)
         length(parts) == 2 || continue
         key = strip(parts[1])
         isempty(key) && continue
-        value = parse_scalar(parts[2])
+        raw_value = strip(parts[2])
+        if isempty(raw_value)
+            out[key] = Any[]
+            sequence_key = key
+            continue
+        end
+        value = parse_scalar(raw_value)
         if haskey(out, key)
             if out[key] isa Vector
                 push!(out[key], value)
@@ -46,6 +57,7 @@ function load_simple_yaml(path::AbstractString)
         else
             out[key] = value
         end
+        sequence_key = nothing
     end
     return out
 end

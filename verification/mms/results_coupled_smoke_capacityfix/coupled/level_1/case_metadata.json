@@ -1,0 +1,101 @@
+{
+  "study": "spatial",
+  "level": 1,
+  "dt_s": 0.01,
+  "final_time_s": 0.03,
+  "moment_origin_m": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "mms_overrides": {
+    "regularize_vlm": {
+      "from": true,
+      "to": false,
+      "reason": "independent MMS finite-horseshoe reference is unregularized"
+    },
+    "shed_boundarylayer": {
+      "from": false,
+      "to": false,
+      "reason": "boundary-layer force is absent from the independent reference"
+    },
+    "force_relax": {
+      "from": 1.0,
+      "to": 1.0,
+      "reason": "manufactured structural load must match the force-exchange reference"
+    },
+    "solid_solver": {
+      "newton_atol": {
+        "from": 1e-06,
+        "to": 1e-10,
+        "reason": "MMS residual must converge below configured source tolerance"
+      },
+      "newton_rtol": {
+        "from": 0.0001,
+        "to": 1e-08,
+        "reason": "MMS residual must converge below configured source tolerance"
+      },
+      "newton_maxiter": {
+        "from": 100,
+        "to": 25,
+        "reason": "allow convergence at the MMS residual tolerances"
+      },
+      "force_ramp_iters": {
+        "from": 10,
+        "to": 1,
+        "reason": "apply the complete matched reference load at each exchange step"
+      }
+    }
+  },
+  "production_fluid_yaml_sha256": "6a198a00f178511428108bc1b82d1dbe8274f10898d6067cb42f98eb72885518",
+  "generated_config_sha256": {
+    "fluid_params.yaml": "c0010bdeedba4ad056e1c9a3f067815c9b793c3f3462dbb0948ae442f0663d8b",
+    "solid_params.yaml": "c3e40bbca095df0e143f5ae14cddf1b5a9b4d3e2c81d5927ec8956dfe6bc9aed",
+    "coupling_params.yaml": "0761e2a5cd1ddc7726597023297ab7ae0d6706cd0032accb841569254047d3c7"
+  },
+  "dependency_versions": {
+    "python_version": "3.10.19",
+    "dolfin_version": "2019.1.0",
+    "julia_dependencies": {
+      "FLOWUnsteady": {
+        "version": "3.4.0",
+        "git-tree-sha1": "2f50941075fab9fcda4321d24829ea5432511b8e",
+        "repo-rev": "master",
+        "repo-url": "https://github.com/byuflowlab/FLOWUnsteady"
+      },
+      "FLOWVLM": {
+        "version": "2.1.4",
+        "git-tree-sha1": "018c7ecafcf04706b7e7c261462b057e8037a1d4",
+        "repo-rev": "master",
+        "repo-url": "https://github.com/byuflowlab/FLOWVLM"
+      },
+      "FLOWVPM": {
+        "version": "4.0.3",
+        "git-tree-sha1": "2bc2101921f012780e6b251e9484561c30d0ca83",
+        "repo-rev": "master",
+        "repo-url": "https://github.com/byuflowlab/FLOWVPM.jl"
+      }
+    },
+    "manifest_path": "/home/dysco/FLOWUnsteady/Manifest.toml"
+  },
+  "effective_mms_settings": {
+    "regularize_vlm": false,
+    "shed_boundarylayer": false,
+    "section_polar": "",
+    "viscous_scheme": "none",
+    "vpm_sfs": "none",
+    "force_relax": 1.0,
+    "moment_origin_m": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "newton_atol": 1e-10,
+    "newton_rtol": 1e-08
+  },
+  "generated_config_paths": {
+    "fluid_params.yaml": "configs/fluid_params.yaml",
+    "solid_params.yaml": "configs/solid_params.yaml",
+    "coupling_params.yaml": "configs/coupling_params.yaml"
+  }
+}

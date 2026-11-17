@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<VTKFile type="Collection" version="0.1" byte_order="LittleEndian">
+  <Collection>
+    <DataSet timestep="0.0" part="0" file="coupled_mms_Wing_vlm.0.vtk" />
+    <DataSet timestep="0.01" part="0" file="coupled_mms_Wing_vlm.1.vtk" />
+    <DataSet timestep="0.02" part="0" file="coupled_mms_Wing_vlm.2.vtk" />
+  </Collection>
+</VTKFile>
