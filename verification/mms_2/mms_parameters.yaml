@@ -1,0 +1,189 @@
+# mms_parameters.yaml  — Single source of all MMS-specific experimental parameters.
+#
+# This file is the ONLY place that defines:
+#   - Manufactured solution amplitudes and frequencies
+#   - Particle population and refinement parameters
+#   - Refinement study mesh / time-step sequences
+#   - Solver tolerances for MMS sub-problems
+#   - Output directory
+#
+# Physical constants (E, nu, rho_s, span, root_chord, …) are read from the
+# production config files in config/ and are NOT duplicated here.
+# Reference: config/solid_params.yaml, config/fluid_params.yaml,
+#            config/coupling_params.yaml
+#
+# Units: SI throughout (m, kg, s, Pa, N, rad).
+# All amplitude choices are small fractions of the reference length Lx=0.24 m
+# so that the small-strain assumption of the production Reissner–Mindlin model
+# remains valid during the MMS study.
+
+# ---------------------------------------------------------------------------
+# Location of production config files (relative to repository root).
+config_dir: "config"
+
+# ---------------------------------------------------------------------------
+# STRUCTURAL MANUFACTURED SOLUTION
+#   q*(x,y,t) = A_j B(x,y) g_j(t),   j ∈ {u, v, w, θ_x, θ_y}
+#   B(x,y)    = sin⁴(πx/Lx) sin⁴(πy/Ly)      ← homogeneous BCs
+#   g_j(t)    = 1 − cos(Ω_j t)                ← zero IC displacement & velocity
+#
+# Amplitude rationale:
+#   w amplitude 1e-3 m ≈ 0.42 % Lx (small but measurable in double precision).
+#   In-plane amplitudes 1e-4 m ≈ 0.042 % Lx.
+#   Rotation amplitudes 1e-3 rad (geometrically consistent with w/Lx).
+#
+# Frequency rationale:
+#   Frequencies chosen incommensurable (2.3, 1.9, 2.3, 2.7, 2.3) so that
+#   each equation is independently excited.  The 2.3 rad/s base is well below
+#   the fundamental natural frequency of the wing (≈ 50 rad/s), so the
+#   temporal signal is smooth and the generalized-α integrator is not stiff.
+structural:
+  amplitudes:
+    u:       1.0e-4   # m  — chordwise in-plane
+    v:       1.0e-4   # m  — spanwise in-plane
+    w:       1.0e-3   # m  — transverse (bending-dominant)
+    theta_x: 1.0e-3   # rad
+    theta_y: -1.0e-3  # rad  (sign variation to independently exercise shear)
+  frequencies:         # rad/s
+    u:       2.3
+    v:       1.9      # distinct from u — exercises mixed-stress coupling
+    w:       2.3
+    theta_x: 2.7      # distinct from w — exercises bending vs. shear independently
+    theta_y: 2.3
+    bound_circulation: 2.3   # temporal frequency for bound-circulation target
+
+# Fraction of chord at which bound vortex is placed (x_bound = fraction * Lx).
+# Default 0.25 corresponds to the production quarter-chord lifting-line rule.
+x_bound_fraction: 0.25
+
+# ---------------------------------------------------------------------------
+# PARTICLE TARGET  (particle-level discrete-model MMS)
+#
+# SCOPE WARNING: This is NOT a continuum Navier–Stokes MMS.
+# It verifies that the production RK3 integrator correctly advances
+# particle positions, circulations, and core widths from an independently
+# derived manufactured source.
+#
+# lambda_sigma (λ_σ = σ₀/h_p):
+#   Core-overlap ratio maintained constant across refinement levels.
+#   At level L, N = n_base * L particles, h_p = Ly / N, σ₀ = λ_σ * h_p.
+#   λ_σ = 2.0 is the standard FLOWVPM overlap (see FLOWVPM docs).
+#   This is a user-configurable geometric parameter, NOT FLOWVPM's lambda_vpm
+#   (which is an RK3 step-size parameter); see README.md §4 for the
+#   explicit relationship.
+#
+# n_base: number of particles at refinement_level = 1.
+#   Must be ≥ 2 for a nontrivial stretching source.
+particles:
+  n_base:        4      # particles at level 1; scaled by level (4, 8, 16, 32 …)
+  lambda_sigma:  2.0    # σ₀ = lambda_sigma * h_p  (dimensionless)
+  omega_x:       2.0    # rad/s — position trajectory frequency
+  omega_gamma:   1.7    # rad/s — circulation trajectory frequency (incommensurable)
+  omega_sigma:   1.3    # rad/s — core trajectory frequency (incommensurable)
+  temporal_study:
+    duration: 0.04
+    dt_s: [0.02, 0.01, 0.005, 0.0025]
+  population_study:
+    levels: [1, 2, 4, 8]
+    evaluation_time: 0.05
+
+# ---------------------------------------------------------------------------
+# BOUND CIRCULATION TARGET  Γ_b*(η_s, t) = γ₀ + a·sin(ω t) + b·cos(ω t)
+#   Imposed in the isolated manufactured target VLM solve and used to
+#   construct the independent Kutta–Joukowski force reference. The main
+#   production wing solve remains independently compared against this target.
+bound_circulation:
+  gamma0: 1.0e-4   # m³/s  base bound circulation
+  a:      1.0e-5   # m³/s  sine  modulation amplitude
+  b:      5.0e-6   # m³/s  cosine modulation amplitude
+
+# ---------------------------------------------------------------------------
+# INTERFACE TRACTION TARGET  t*(η_s, η_c, t)
+#   Smooth prescribed traction for the standalone transfer MMS.
+#   For the coupled MMS, the structural source uses the KJ panel force
+#   derived from BoundCirculationTarget (not this traction).
+interface_traction:
+  T_x:     1.0e-2  # N/m²  chordwise amplitude
+  T_y:     5.0e-3  # N/m²  spanwise amplitude
+  T_z:     2.0e-2  # N/m²  normal (lift-dominant)
+  omega_t: 2.3     # rad/s temporal frequency
+  evaluation_time: 0.05 # s — fixed time for standalone transfer diagnostics
+  quadrature_order: 32
+  n_span_levels: [8, 16, 32, 64]
+
+# ---------------------------------------------------------------------------
+# REFINEMENT STUDY — STANDALONE PLATE
+#
+# spatial_cases: each case specifies (nx, ny, dt, duration).
+#   nx, ny: number of mesh intervals in x (chord) and y (span) directions.
+#   dt, duration: time step and physical end time.
+#   Mesh is refined while dt is held fixed to isolate spatial order.
+#   Linear element (CG1) theoretical spatial order: 2 for displacements.
+#   Quadratic element (CG2) theoretical spatial order: 3.
+#   Generalized-α theoretical temporal order: 2.
+#
+# temporal_cases: each case specifies (nx, ny, dt, duration).
+#   nx, ny: fixed fine mesh to minimize spatial pollution.
+#   dt refined to isolate temporal order.
+standalone_plate:
+  element_degree: 2    # CG polynomial degree (must match production solver)
+  spatial_cases:
+    - {nx:  6,  ny:   8, dt: 1.000e-3, duration: 0.005}
+    - {nx: 12,  ny:  16, dt: 1.000e-3, duration: 0.005}
+    - {nx: 24,  ny:  32, dt: 1.000e-3, duration: 0.005}
+    - {nx: 48,  ny:  64, dt: 1.000e-3, duration: 0.005}
+  temporal_cases:
+    - {nx: 24, ny: 32, dt: 4.000e-3, duration: 0.02}
+    - {nx: 24, ny: 32, dt: 2.000e-3, duration: 0.02}
+    - {nx: 24, ny: 32, dt: 1.000e-3, duration: 0.02}
+    - {nx: 24, ny: 32, dt: 5.000e-4, duration: 0.02}
+
+# ---------------------------------------------------------------------------
+# REFINEMENT STUDY — COUPLED FSI
+#
+# base_n_span / base_nx / base_ny define the coarsest coupled case.
+# Refinement factor L multiplies all three simultaneously.
+# Particle count also scales with L (see particles.n_base above).
+coupled:
+  base_n_span:   8    # spanwise communication stations at level 1
+  base_nx:       4    # structural mesh chordwise at level 1
+  base_ny:       8    # structural mesh spanwise at level 1
+  base_dt:       0.01    # s — base time step
+  base_duration: 0.03    # s — physical simulation duration
+  temporal_mesh_level: 4 # fixed mesh/population for temporal refinement
+  moment_origin_m: [0.0, 0.0, 0.0] # common inertial origin for interface moments
+  spatial_levels:   [1, 2, 4, 8]    # L = 1, 2, 4, 8 (N particles = n_base * L)
+  temporal_levels:  [1, 2, 4, 8]    # dt/L  (spatial mesh fixed at level 4)
+  time_match_tolerance_s: 1.0e-10
+  # Hard gates for the directly manufactured production-VLM linear solve.
+  # MUMPS direct factorization in Float64 should leave backward error near
+  # machine precision; 1e-10 permits conditioning/serialization effects while
+  # still detecting a materially incorrect target solve.
+  target_vlm_circulation_rtol: 1.0e-10
+  vlm_algebraic_residual_rtol: 1.0e-10
+  vlm_reported_error_atol: 5.0e-13
+  moment_origin_csv_atol_m: 5.0e-12
+  target_station_atol_m: 5.0e-12
+  # Exact force/moment constraints use double precision and small dense
+  # constraint systems; this gate admits only roundoff-level conservation.
+  transfer_wrench_rtol: 1.0e-10
+  # The same transfer matrices define both sides of the discrete virtual-work
+  # identity; this is a roundoff gate, not a convergence tolerance.
+  transfer_work_rtol: 1.0e-10
+
+# ---------------------------------------------------------------------------
+# SOLVER TOLERANCES FOR MMS SUB-PROBLEMS
+#
+# Newton tolerance much tighter than default to ensure the nonlinear solver
+# residual is below the discretization error at the finest level.
+solvers:
+  newton_atol:          1.0e-10
+  newton_rtol:          1.0e-8
+  newton_maxiter:       25
+  newton_max_backtracks: 12
+  ksp_solver:           "mumps"      # direct LU (no iterative error at fine mesh)
+  ksp_rtol:             1.0e-12
+
+# ---------------------------------------------------------------------------
+# OUTPUT
+output_dir: "verification/mms_2/results"

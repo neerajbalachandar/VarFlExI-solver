@@ -5,6 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
 CONDA_BIN="${CONDA_BIN:-conda}"
+if ! command -v "$CONDA_BIN" &>/dev/null && [ -x "/home/dysco/anaconda3/bin/conda" ]; then
+    CONDA_BIN="/home/dysco/anaconda3/bin/conda"
+fi
 FENICS_ENV="${FENICS_ENV:-fenics-env}"
 JULIA_BIN="${JULIA_BIN:-$ROOT/verification/mms/julia_with_openssl.sh}"
 FLOWUNSTEADY_PROJECT="${FLOWUNSTEADY_PROJECT:-$(cd "$ROOT/.." && pwd)}"
@@ -16,100 +19,64 @@ run_python() {
 
 usage() {
     cat <<'EOF'
-Usage: verification/mms/run_pipeline.sh [preflight|plate|fluid|coupled_quick|coupled|all]
+Usage: verification/mms/run_pipeline.sh [test|structural|transfer|fluid|coupled|all]
+
+Unified MMS Verification Suite (CMAME Framework):
+  test          Run automated consistency tests (derivatives, BCs, independence, RK3, work)
+  structural    Standalone Reissner–Mindlin plate MMS (spatial & temporal refinement)
+  transfer      Interface force/moment transfer MMS (CRM & RBF work duality)
+  fluid         Particle-level rVPM MMS (analytic stretching source and RK3 convergence)
+  coupled       Coupled FSI MMS refinement across levels
+  all           Run the full verification suite
 
 Environment:
   FENICS_ENV              Conda environment name (default: fenics-env)
-  CONDA_BIN               Conda executable (default: conda)
+  CONDA_BIN               Conda executable (default: conda or /home/dysco/anaconda3/bin/conda)
   JULIA_BIN               Julia launcher (default: bundled OpenSSL-compatible launcher)
-  JULIA_REAL_BIN          Julia executable used by the bundled launcher
-  JULIA_OPENSSL_LIB       OpenSSL artifact lib directory, if not the default
-  JULIA_NUM_THREADS       Julia threads for the fluid FMM study (default: available CPUs)
   FLOWUNSTEADY_PROJECT    Julia project directory (default: ../FLOWUnsteady)
-
-All execution phases run real solver cases and can take substantial time.
-Outputs are written below verification/mms/results/pipeline/.
 EOF
 }
 
 phase="${1:-all}"
 case "$phase" in
     -h|--help|help) usage; exit 0 ;;
-    preflight|plate|fluid|coupled_quick|coupled|all) ;;
+    test|structural|plate|transfer|fluid|coupled|all) ;;
     *) usage >&2; exit 2 ;;
 esac
 
-run_preflight() {
-    run_python verification/mms/checks_target.py
-    run_python verification/mms/checks_coupled_solid.py
-    run_python verification/mms/jacobian_check.py --output verification/mms/results/pipeline/plate_jacobian_check.csv
-    run_python verification/mms/strong_weak_check.py --mode continuous --formulation nonlinear --resolution 12x24
-    run_python verification/mms/transfer_moving_interface.py \
-        --csv verification/mms/results/pipeline/transfer_moving_interface.csv \
-        --json verification/mms/results/pipeline/transfer_moving_interface.json
-    "$JULIA_BIN" --project="$FLOWUNSTEADY_PROJECT" verification/mms/particle_position_stage_check.jl
-    "$JULIA_BIN" --project="$FLOWUNSTEADY_PROJECT" verification/mms/circulation_reference_check.jl
+run_test() {
+    echo "=== Running Automated MMS Consistency Tests ==="
+    run_python verification/mms/mms_driver.py test
 }
 
-run_plate() {
-    run_python verification/mms/scalar_generalized_alpha.py \
-        --output-dir verification/mms/results/pipeline/scalar_generalized_alpha
-    run_python verification/mms/refinement.py --study spatial --execute \
-        --output-dir verification/mms/results/pipeline/plate_spatial
-    run_python verification/mms/refinement.py --study temporal --execute \
-        --output-dir verification/mms/results/pipeline/plate_temporal
+run_structural() {
+    echo "=== Running Standalone Structural MMS ==="
+    run_python verification/mms/mms_driver.py structural
+}
+
+run_transfer() {
+    echo "=== Running Interface Transfer MMS ==="
+    run_python verification/mms/mms_driver.py transfer
 }
 
 run_fluid() {
-    local fluid_threads="${JULIA_NUM_THREADS:-$(nproc)}"
-    printf '[fluid] Julia threads=%s\n' "$fluid_threads"
-    JULIA_NUM_THREADS="$fluid_threads" "$JULIA_BIN" --project="$FLOWUNSTEADY_PROJECT" verification/mms/run_refinement.jl \
-        --study time,panels --execute --output verification/mms/results/pipeline/fluid
-    run_python verification/mms/analyze.py --study time --results verification/mms/results/pipeline/fluid
-    run_python verification/mms/analyze.py --study panels --results verification/mms/results/pipeline/fluid
-}
-
-run_coupled_quick() {
-    run_python verification/mms/checks_target.py
-    run_python verification/mms/run_coupled_mms.py \
-        --output verification/mms/results/pipeline/coupled_smoke \
-        --steps 3 --dt 0.01 --n-span 16 --nx 8 --ny 16
-    run_python verification/mms/checks_coupled_smoke.py \
-        --output verification/mms/results/pipeline/G0
-    run_python verification/mms/checks_transfer_mms.py
+    echo "=== Running Particle-Level rVPM MMS ==="
+    run_python verification/mms/mms_driver.py fluid
 }
 
 run_coupled() {
-    run_python verification/mms/checks_target.py
-    run_python -c 'from verification.mms.coupled_target import build_default_target, write_manifest; write_manifest(build_default_target("config", 0.03, 16), "verification/mms/results/pipeline/coupled_target.json")'
-    "$JULIA_BIN" --project="$FLOWUNSTEADY_PROJECT" verification/mms/checks_manifest_loading.jl \
-        verification/mms/results/pipeline/coupled_target.json
-    run_python verification/mms/run_coupled_mms.py \
-        --output verification/mms/results/pipeline/coupled_smoke \
-        --steps 3 --dt 0.01 --n-span 16 --nx 8 --ny 16
-    run_python verification/mms/checks_coupled_smoke.py \
-        --output verification/mms/results/pipeline/G0
-    run_python verification/mms/checks_transfer_mms.py
-    run_python verification/mms/run_coupled_refinement.py \
-        --study both --levels 1,2,4 --duration 0.03 --dt 0.01 \
-        --n-span 8 --nx 4 --ny 8 \
-        --output verification/mms/results/pipeline/coupled_refinement
-    run_python verification/mms/plot_coupled_refinement.py \
-        --results verification/mms/results/pipeline/coupled_refinement
+    echo "=== Running Coupled FSI MMS ==="
+    run_python verification/mms/mms_driver.py coupled --levels 1,2,4
 }
 
 case "$phase" in
-    preflight) run_preflight ;;
-    plate) run_plate ;;
-    fluid) run_fluid ;;
-    coupled_quick) run_coupled_quick ;;
-    coupled) run_coupled ;;
+    test)             run_test ;;
+    structural|plate) run_structural ;;
+    transfer)         run_transfer ;;
+    fluid)            run_fluid ;;
+    coupled)          run_coupled ;;
     all)
-        run_preflight
-        run_plate
-        run_fluid
-        run_coupled
+        echo "=== Running Full MMS Verification Suite ==="
+        run_python verification/mms/mms_driver.py all
         ;;
 esac
-
-printf 'Pipeline phase complete: %s\n' "$phase"

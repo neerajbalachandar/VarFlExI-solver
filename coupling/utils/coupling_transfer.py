@@ -424,10 +424,28 @@ class CouplingTransfer:
         self, delta_nodal_displacements, aero_forces, nodal_forces, epsilon_reg=1.0e-16
     ):
         """Audit virtual work using the CP/nodal operator pair actually used for loads."""
-        delta_nodal_displacements = np.asarray(delta_nodal_displacements, dtype=float).reshape(-1, 3)
-        aero_forces = np.asarray(aero_forces, dtype=float).reshape(-1, 3)
-        nodal_forces = np.asarray(nodal_forces, dtype=float).reshape(-1, 3)
+        def as_vectors(values, name):
+            result = np.asarray(values, dtype=float)
+            if result.ndim != 2 or result.shape[1] != 3:
+                raise ValueError(f"{name} must have shape (n, 3); got {result.shape}")
+            if result.shape[0] == 0:
+                raise ValueError(f"{name} must contain at least one vector")
+            if not np.isfinite(result).all():
+                raise ValueError(f"{name} must contain only finite values")
+            return result
+
+        if not np.isfinite(float(epsilon_reg)) or float(epsilon_reg) <= 0.0:
+            raise ValueError("epsilon_reg must be finite and positive")
+        delta_nodal_displacements = as_vectors(delta_nodal_displacements, "delta_nodal_displacements")
+        aero_forces = as_vectors(aero_forces, "aero_forces")
+        nodal_forces = as_vectors(nodal_forces, "nodal_forces")
+        if delta_nodal_displacements.shape != nodal_forces.shape:
+            raise ValueError("delta_nodal_displacements and nodal_forces must have the same shape")
+        if aero_forces.shape[0] != self.A_diag.shape[0]:
+            raise ValueError("aero_forces count does not match the configured panel area vector")
         delta_cp = self.cp_displacements_for_force_work(delta_nodal_displacements)
+        if delta_cp.shape != aero_forces.shape:
+            raise ValueError("transferred CP displacement and aerodynamic force shapes do not match")
         Wf = float(np.sum(delta_cp * (aero_forces * self.A_diag[:, None])))
         Ws = float(np.sum(delta_nodal_displacements * nodal_forces))
         defect = Wf - Ws
@@ -435,8 +453,9 @@ class CouplingTransfer:
         return Wf, Ws, defect, relative_error
 
     @staticmethod
-    def wrench_transfer_metrics(aero_coords, aero_forces, solid_coords, nodal_forces, epsilon_reg=1.0e-16):
-        """Return net-force and net-moment transfer residuals about the origin."""
+    def wrench_transfer_metrics(aero_coords, aero_forces, solid_coords, nodal_forces,
+                                epsilon_reg=1.0e-16, moment_origin=(0.0, 0.0, 0.0)):
+        """Return force and moment residuals about a shared inertial origin."""
 
         def as_xyz(values, name):
             values = np.asarray(values, dtype=float)
@@ -444,6 +463,8 @@ class CouplingTransfer:
                 raise ValueError(
                     f"{name} must have shape (n, 2) or (n, 3); got {values.shape}"
                 )
+            if values.shape[0] == 0:
+                raise ValueError(f"{name} must contain at least one coordinate")
             if values.shape[1] == 2:
                 # The plate and aerodynamic surface meshes are planar (x, y).
                 # Preserve one row per mesh node when forming 3D moment arms.
@@ -454,12 +475,22 @@ class CouplingTransfer:
             values = np.asarray(values, dtype=float)
             if values.ndim != 2 or values.shape[1] != 3:
                 raise ValueError(f"{name} must have shape (n, 3); got {values.shape}")
+            if values.shape[0] == 0:
+                raise ValueError(f"{name} must contain at least one vector")
             return values
 
         aero_coords = as_xyz(aero_coords, "aero_coords")
         aero_forces = as_vectors(aero_forces, "aero_forces")
         solid_coords = as_xyz(solid_coords, "solid_coords")
         nodal_forces = as_vectors(nodal_forces, "nodal_forces")
+        if not all(np.isfinite(values).all() for values in
+                   (aero_coords, aero_forces, solid_coords, nodal_forces)):
+            raise ValueError("wrench metric coordinates and forces must be finite")
+        moment_origin = np.asarray(moment_origin, dtype=float)
+        if moment_origin.shape != (3,) or not np.isfinite(moment_origin).all():
+            raise ValueError("moment_origin must be a finite three-vector")
+        if not np.isfinite(float(epsilon_reg)) or float(epsilon_reg) <= 0.0:
+            raise ValueError("epsilon_reg must be finite and positive")
         if aero_coords.shape[0] != aero_forces.shape[0]:
             raise ValueError(
                 "Aerodynamic coordinate/force count mismatch: "
@@ -472,8 +503,8 @@ class CouplingTransfer:
             )
         force_fluid = np.sum(aero_forces, axis=0)
         force_solid = np.sum(nodal_forces, axis=0)
-        moment_fluid = np.sum(np.cross(aero_coords, aero_forces), axis=0)
-        moment_solid = np.sum(np.cross(solid_coords, nodal_forces), axis=0)
+        moment_fluid = np.sum(np.cross(aero_coords - moment_origin, aero_forces), axis=0)
+        moment_solid = np.sum(np.cross(solid_coords - moment_origin, nodal_forces), axis=0)
         force_residual = force_solid - force_fluid
         moment_residual = moment_solid - moment_fluid
         force_relative_error = float(np.linalg.norm(force_residual)) / max(

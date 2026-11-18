@@ -36,12 +36,8 @@ function mms_probe_fields(pfield, probes, t, dt)
 end
 
 function solve_mms_target_aerodynamics!(PFIELD, T, DT)
-    if !mms_target_history_initialized[]
-        mms_target_history_initialized[] = true
-        saved_relaxed_force = copy(target_forces_prev)
-        solve_mms_target_aerodynamics!(PFIELD, 0.0, DT)
-        target_forces_prev .= saved_relaxed_force
-    end
+    isfinite(T) && isfinite(DT) && DT > 0.0 || error(
+        "MMS target aerodynamic evaluation requires finite time and positive dt")
     wing = mms_target_wing
     system = mms_target_system
     m = vlm.get_m(wing)
@@ -72,26 +68,24 @@ function solve_mms_target_aerodynamics!(PFIELD, T, DT)
     ap, a, b, bp = (uns._get_Xs(system, key; t=T) for key in ("Ap", "A", "B", "Bp"))
     mids = vcat((ap .+ a)./2, (a .+ b)./2, (b .+ bp)./2)
     points = vcat(cp, mids)
-    target_pf = deepcopy(PFIELD)
-    target_pf.t = T
     Xh, Gh, Sh = particle_target_state(mms_target, T)
-    total = vpm.get_np(target_pf)
-    static_count = count(i -> vpm.is_static(vpm.get_particle(target_pf, i)), 1:total)
-    dynamic_count = total - static_count
-    while dynamic_count < length(mms_target.ids)
-        i = dynamic_count + 1
-        vpm.add_particle(target_pf, view(Xh,i,:), view(Gh,i,:), Sh[i]; static=false)
-        dynamic_count += 1
+    # Build a disjoint target field: copy only prescribed static/background
+    # particles, then append the immutable target population in manifest order.
+    # Numerical dynamic particles never enter target flow or force evaluation.
+    numerical_count = vpm.get_np(PFIELD)
+    static_slots = [i for i in 1:numerical_count if vpm.is_static(vpm.get_particle(PFIELD, i))]
+    target_pf = vpm.ParticleField(length(static_slots) + length(mms_target.ids),
+        eltype(PFIELD.particles); formulation=PFIELD.formulation, viscous=PFIELD.viscous,
+        nt=PFIELD.nt, t=T, transposed=PFIELD.transposed, fmm=PFIELD.fmm,
+        SFS=PFIELD.SFS, kernel=PFIELD.kernel, UJ=PFIELD.UJ, Uinf=PFIELD.Uinf,
+        relaxation=PFIELD.relaxation, integration=PFIELD.integration, useGPU=0)
+    for slot in static_slots
+        particle = vpm.get_particle(PFIELD, slot)
+        vpm.add_particle(target_pf, vpm.get_X(particle), vpm.get_Gamma(particle),
+                         vpm.get_sigma(particle)[]; static=true)
     end
-    first_target = Int(mms_target_start[])
-    first_target > 0 && first_target + length(mms_target.ids) - 1 <= vpm.get_np(target_pf) ||
-        error("fixed-population MMS target slots are missing from the aerodynamic target field")
     for i in eachindex(mms_target.ids)
-        slot = first_target + i - 1
-        vpm.set_X(target_pf, slot, view(Xh,i,:))
-        vpm.set_Gamma(target_pf, slot, view(Gh,i,:))
-        vpm.set_sigma(target_pf, slot, Sh[i])
-        vpm.set_static(target_pf, slot, 0.0)
+        vpm.add_particle(target_pf, view(Xh,i,:), view(Gh,i,:), Sh[i]; static=false)
     end
     induced = uns.Vvpm_on_Xs(target_pf, points; dt=DT)
     vlm._addsolution(system, "Vvpm", induced[1:m]; t=T)
@@ -104,46 +98,101 @@ function solve_mms_target_aerodynamics!(PFIELD, T, DT)
     vlm._addsolution(system, "Vkin_ApA", vmid[1:m]; t=T)
     vlm._addsolution(system, "Vkin_AB", vmid[m+1:2m]; t=T)
     vlm._addsolution(system, "Vkin_BBp", vmid[2m+1:3m]; t=T)
-    vlm.solve(system, Vinf; t=T, extraVinf=uns._extraVinf2, keep_sol=true,
-              vortexsheet=(X,t)->zeros(3))
-
-    # Independently form the installed discrete no-penetration residual.
-    hs = vlm.getHorseshoes(wing)
-    # FLOWVLM.V returns the induced velocity when a horseshoe carries Gamma;
-    # clear only these private residual-evaluation copies so A contains the
-    # geometry factors exactly once.
+    # Build the discrete manufactured RHS from the analytical circulation,
+    # then inject it as a normal-velocity correction into the production
+    # solver's RHS adapter.  This does not overwrite Gamma after the solve.
+    target_gamma = bound_circulation_state(mms_target, T, m)
+    target_dgamma = bound_circulation_derivative(mms_target, T, m)
+    hs = vlm.getHorseshoes(wing; t=T)
     foreach(hs) do horseshoe
         horseshoe[8] = nothing
     end
-    A, rhs = zeros(m,m), zeros(m)
+    A, rhs, normals = zeros(m,m), zeros(m), zeros(m,3)
     for i in 1:m
         _, ai, bi, _, cpi, _, _, _ = hs[i]
         ni = cross(cpi-ai, bi-ai); ni ./= norm(ni)
+        normals[i,:] .= ni
         for j in 1:m
-            A[i,j] = dot(vlm.VLMSolver.V(hs[j], cpi; ign_infvortex=true)/(4pi), ni)
+            hs_j = hs[j]
+            induced_horseshoe = independent_finite_vortex_segment(hs_j[1], hs_j[2], cpi, 1.0) +
+                                 independent_finite_vortex_segment(hs_j[2], hs_j[3], cpi, 1.0) +
+                                 independent_finite_vortex_segment(hs_j[3], hs_j[4], cpi, 1.0)
+            A[i,j] = dot(induced_horseshoe, ni)
         end
-        # `wing.sol["Vinf"]` is the assembled FLOWVLM production RHS velocity
-        # (freestream plus `_extraVinf2`, including target VPM and kinematics).
-        # Reuse that exact input while independently rebuilding A and its
-        # no-penetration residual.
-        rhs[i] = -dot(wing.sol["Vinf"][i], ni)
+        target_velocity = Float64.(Vinf(cpi, T)) + induced[i] + vcp[i]
+        rhs[i] = -dot(target_velocity, ni)
     end
-    circulation_residual = norm(A * wing.sol["Gamma"] - rhs) / max(norm(rhs), eps())
+    manufactured_rhs = A * target_gamma - rhs
+    mms_extraVinf = (i, t; kwargs...) ->
+        uns._extraVinf2(i, t; kwargs...) .- manufactured_rhs[i] .* view(normals, i, :)
+    vlm.solve(system, Vinf; t=T, extraVinf=mms_extraVinf, keep_sol=true,
+              vortexsheet=(X,t)->zeros(3))
+    rhs_modified = rhs .+ manufactured_rhs
+    circulation_residual = norm(A * wing.sol["Gamma"] - rhs_modified) /
+                           max(norm(rhs_modified), eps())
+    circulation_target_error = norm(wing.sol["Gamma"] - target_gamma) /
+                               max(norm(target_gamma), eps())
 
-    fraw = aerodynamic_force_calculator(system, previous_target_force_system[], target_pf,
-                                        Vinf, DT, rho; t=T)
-    if haskey(mms_target_wing.sol, "Funs-vector")
-        fraw = [fraw[i] + mms_target_wing.sol["Funs-vector"][i] for i in eachindex(fraw)]
+    # Independent assembly of the production actuator-line force definition:
+    # Kutta–Joukowski forces on ApA, AB, and BBp plus the unsteady-circulation
+    # force on the two horseshoe triangles. No production force calculator is
+    # used to manufacture this reference load.
+    force_horseshoes = vlm.getHorseshoes(wing; t=T)
+    for i in eachindex(force_horseshoes)
+        force_horseshoes[i][8] = target_gamma[i]
     end
-    previous_target_force_system[] = deepcopy(system)
-    fmat = reduce(vcat, (reshape(Float64.(fraw[i]),1,3) for i in eachindex(fraw)))
-    fmat = force_relax .* fmat .+ (1-force_relax) .* target_forces_prev
-    target_forces_prev .= fmat
+    segment_points = vcat(ap .+ a, a .+ b, b .+ bp) ./ 2
+    target_np = vpm.get_np(target_pf)
+    target_X = zeros(target_np, 3)
+    target_G = similar(target_X)
+    target_S = zeros(target_np)
+    for i in 1:target_np
+        particle = vpm.get_particle(target_pf, i)
+        target_X[i,:] .= vpm.get_X(particle)
+        target_G[i,:] .= vpm.get_Gamma(particle)
+        target_S[i] = vpm.get_sigma(particle)[]
+    end
+    node_points = (ap, a, b, bp)
+    node_velocity = [[mms_target_surface_velocity(mms_target, x[1], x[2], T) for x in rows]
+                     for rows in node_points]
+    fmat = zeros(m, 3)
+    for panel in 1:m
+        gamma = target_gamma[panel]
+        for segment in 1:3
+            row = panel + (segment-1)*m
+            point = segment_points[row]
+            vvlm = zeros(3)
+            for source in 1:m
+                hs_source = force_horseshoes[source]
+                vvlm .+= independent_finite_vortex_segment(hs_source[1], hs_source[2], point, target_gamma[source])
+                vvlm .+= independent_finite_vortex_segment(hs_source[2], hs_source[3], point, target_gamma[source])
+                vvlm .+= independent_finite_vortex_segment(hs_source[3], hs_source[4], point, target_gamma[source])
+            end
+            vtran = (node_velocity[segment][panel] + node_velocity[segment+1][panel]) ./ 2
+            vpm_target_velocity = independent_biot_savart_velocity(point, target_X, target_G, target_S)
+            velocity = Float64.(Vinf(point, T)) + vpm_target_velocity + vvlm + vtran
+            bound_vector = segment == 1 ? ap[panel] - a[panel] :
+                           segment == 2 ? b[panel] - a[panel] : bp[panel] - b[panel]
+            fmat[panel,:] .+= rho * gamma .* cross(velocity, bound_vector)
+        end
+        dgamma = target_dgamma[panel]
+        l1a, l2a = ap[panel] - a[panel], b[panel] - a[panel]
+        l1b, l2b = a[panel] - b[panel], bp[panel] - b[panel]
+        triangle_scale = 1.0 / (2.0 * (1.0 - vlm.pn))
+        area_normal = triangle_scale .* (cross(l1a,l2a) + cross(l1b,l2b))
+        fmat[panel,:] .-= rho * dgamma .* area_normal
+    end
     lift, drag = sum(fmat[:,3]), -sum(fmat[:,1])
     qinf = 0.5*rho*sum(sum(abs2,Vinf([wing._xm[i],wing._ym[i],wing._zm[i]],T)) for i in 1:m)/m
     area = max(span*root_chord,1e-16)
     numeric_count = vpm.get_np(PFIELD)
+    numeric_dynamic_slots = [i for i in 1:numeric_count if !vpm.is_static(vpm.get_particle(PFIELD, i))]
+    length(numeric_dynamic_slots) == length(mms_target.ids) || error(
+        "fixed-population MMS requires exactly $(length(mms_target.ids)) numerical dynamic particles; " *
+        "found $(length(numeric_dynamic_slots))")
     numeric_start = Int(mms_target_start[])
+    numeric_dynamic_slots == collect(numeric_start:(numeric_start + length(mms_target.ids) - 1)) ||
+        error("numerical MMS particles no longer match the immutable target ID ordering")
     numeric_X = zeros(length(mms_target.ids),3)
     numeric_G = similar(numeric_X)
     numeric_S = zeros(length(mms_target.ids))
@@ -168,7 +217,8 @@ function solve_mms_target_aerodynamics!(PFIELD, T, DT)
         "le" => [[Float64(wing._xlwingdcr[i]),Float64(wing._ywingdcr[i]),Float64(wing._zlwingdcr[i])] for i in eachindex(wing._xlwingdcr)],
         "te" => [[Float64(wing._xtwingdcr[i]),Float64(wing._ywingdcr[i]),Float64(wing._ztwingdcr[i])] for i in eachindex(wing._xtwingdcr)],
     )
-    return Float64.(wing.sol["Gamma"]), fmat, lift/(qinf*area), drag/(qinf*area), circulation_residual,
+    return target_gamma, fmat, lift/(qinf*area), drag/(qinf*area), circulation_residual,
+           circulation_target_error, Float64.(wing.sol["Gamma"]),
            target_state, numerical_state, particle_error, grid_velocity_error, target_geometry,
            grid, tar_probe_velocity, num_probe_velocity, tar_probe_vorticity, num_probe_vorticity
 end
@@ -335,18 +385,25 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     target_payload = Dict{String,Any}()
     if mms_target_enabled
         target_gamma, target_force, target_cl, target_cd, target_residual,
+            target_gamma_error, target_vlm_gamma,
             target_particle_state, numerical_particle_state, particle_error, grid_velocity_error,
             target_geometry, probe_positions, target_probe_velocity, numerical_probe_velocity,
             target_probe_vorticity, numerical_probe_vorticity =
             solve_mms_target_aerodynamics!(PFIELD, Float64(T), Float64(DT))
         target_q = [structural_state(mms_target, 0.75*Float64(mms_target.data["chord"]),
                        Float64(y), Float64(T))[1] for y in mms_target.data["y_stations"]]
-        target_payload = Dict(
+    target_payload = Dict(
+            "target_particle_ids" => mms_target.ids,
+            "numerical_particle_ids" => mms_target.ids,
             "target_bound_circulation" => target_gamma,
+            "target_y_stations_m" => Float64.(mms_target.data["y_stations"]),
             "target_force" => target_force,
             "target_cl" => target_cl,
             "target_cd" => target_cd,
             "target_circulation_residual" => target_residual,
+            "vlm_algebraic_residual" => target_residual,
+            "target_vlm_circulation_error" => target_gamma_error,
+            "target_vlm_solved_circulation" => target_vlm_gamma,
             "target_particle_state" => target_particle_state,
             "numerical_particle_state" => numerical_particle_state,
             "particle_state_error" => particle_error,
@@ -371,6 +428,7 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     trace_record = Dict(
             "step" => step,
             "fluid_time_s" => Float64(T),
+            "dt" => Float64(DT),
             "n_span" => m_span,
             "n_chord" => 1,
             "indexing" => "span-major",
@@ -380,6 +438,8 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
             "rVPM_RK3_stage_source_norms" => rk3_stage_source_norms,
             "force" => force_out,
             "geometry_cp_absolute" => geometry_cp_absolute,
+            "geometry_le_absolute" => geometry_le_absolute,
+            "geometry_te_absolute" => geometry_te_absolute,
             "station_cl" => station_cl,
             "station_cd" => station_cd,
             "station_cm" => station_cm,

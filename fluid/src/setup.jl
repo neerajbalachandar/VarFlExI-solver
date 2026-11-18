@@ -84,6 +84,12 @@ mms_target_path = strip(string(something(args["mms_target"], get(ENV, "VARFLEXI_
 mms_target = nothing
 mms_target_enabled = !isempty(mms_target_path)
 if mms_target_enabled
+    isempty(solver_cfg.section_polar) || error(
+        "The coupled MMS independent force model excludes parasitic airfoil-polar drag; " *
+        "set section_polar empty for this MMS run")
+    solver_cfg.regularize_vlm && error(
+        "The coupled MMS independent horseshoe kernel is unregularized; disable regularize_vlm " *
+        "for this MMS run")
     if !isdefined(@__MODULE__, :CoupledMMSTarget)
         include(joinpath(@__DIR__, "mms_coupled_source.jl"))
     end
@@ -198,11 +204,17 @@ wake_treatment_sphere = uns.remove_particles_sphere(
     (wake_sphere_factor * b)^2, 1; Xoff=[0.5 * b, 0.0, 0.0]
 )
 
-wake_treatment = uns.concatenate(
-    wake_treatment_sphere,
-    wake_treatment_strength,
-    wake_treatment_sigma
-)
+if mms_target_enabled
+    # The coupled target defines a fixed particle population. Shedding and
+    # pruning are intentionally excluded and recorded in run provenance.
+    wake_treatment = (args...; kwargs...) -> nothing
+else
+    wake_treatment = uns.concatenate(
+        wake_treatment_sphere,
+        wake_treatment_strength,
+        wake_treatment_sigma
+    )
+end
 
 vpm_fmm_settings = vpm.FMM(
     p=wake_cfg.fmm_p,
@@ -262,6 +274,12 @@ run_metadata = Dict{String, Any}(
         "static_particle_prefix" => run_name * "_staticpfield",
         "viscous_scheme" => wake_cfg.viscous_scheme,
         "vpm_sfs" => solver_cfg.vpm_sfs,
+        "mms_fixed_population_lifecycle" => mms_target_enabled ? Dict(
+            "enabled" => true, "starting_shedding" => false,
+            "unsteady_shedding" => false, "boundary_layer_shedding" => false,
+            "particle_pruning" => false,
+            "target_ids" => mms_target.ids,
+        ) : Dict("enabled" => false),
         "fmm" => Dict(
             "p" => wake_cfg.fmm_p, "ncrit" => wake_cfg.fmm_ncrit,
             "theta" => wake_cfg.fmm_theta,
@@ -307,9 +325,6 @@ if mms_target_enabled
     vlm.addwing(mms_target_system, "Wing", mms_target_wing)
     vlm.setVinf(mms_target_system, Vinf)
     ensure_gamma!(mms_target_system, vlm.get_m(mms_target_system))
-    previous_target_force_system = Ref(deepcopy(mms_target_system))
-    mms_target_history_initialized = Ref(false)
-    target_forces_prev = zeros(m_span, 3)
 end
 ys_ref = [wing_ref._ym[i] for i in 1:m_span]
 eta_span_fluid = [clamp(ys_ref[i] / span, 0.0, 1.0) for i in 1:m_span]

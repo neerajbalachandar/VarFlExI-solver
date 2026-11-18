@@ -5,7 +5,9 @@ lifecycle, and does not treat CRM/RBF moment conservation as verified.
 
 Implements formulation sections "Fixed-population target", "Actual particle
 evolution operator", "RK-stage evaluation", and "Core spreading and remapping
-are handled as actually implemented". The particle source is fixed-population;
+are handled as actually implemented". Gaussian-erf stretching uses an
+independently coded analytic kernel Jacobian matching FLOWVPM 4.0.3's direct
+interaction derivative and exact self-exclusion convention. The particle source is fixed-population;
 the coupled structural source is Objective B (end-to-end transfer and FSI
 accuracy). Target data are read-only and numerical particle states are never
 assigned from the target.
@@ -25,6 +27,21 @@ function CoupledMMSTarget(path::AbstractString)
     isfile(path) || error("MMS target manifest does not exist: $path")
     data = JSON.parsefile(path)
     haskey(data, "particles") || error("MMS manifest is missing particles")
+    haskey(data, "bound_circulation") || error("MMS manifest is missing bound_circulation")
+    n_span = Int(get(data, "n_span", 0))
+    n_span > 0 || error("MMS manifest n_span must be positive")
+    stations = Float64.(get(data, "y_stations", Float64[]))
+    length(stations) == n_span && all(isfinite, stations) && all(diff(stations) .> 0.0) ||
+        error("MMS manifest target stations must be finite, increasing, and match n_span")
+    bc = data["bound_circulation"]
+    all(haskey(bc, key) for key in ("gamma0", "a", "b", "omega")) ||
+        error("MMS manifest bound-circulation target is incomplete")
+    gamma0, a, b = (Float64.(bc[key]) for key in ("gamma0", "a", "b"))
+    omega = Float64(bc["omega"])
+    length(gamma0) == length(a) == length(b) == n_span ||
+        error("MMS bound-circulation arrays must match n_span")
+    isfinite(omega) && omega > 0.0 && all(isfinite, gamma0) && all(isfinite, a) && all(isfinite, b) ||
+        error("MMS bound-circulation target coefficients/frequency must be finite and valid")
     pdata = data["particles"]
     required = ("ids", "x0", "gamma0", "sigma0", "a", "b", "c", "d", "e",
                 "omega_x", "omega_gamma", "omega_sigma")
@@ -121,6 +138,34 @@ function particle_derivatives(target::CoupledMMSTarget, t)
     return Xt, Gt, st
 end
 
+function bound_circulation_state(target::CoupledMMSTarget, t, n_span::Int)
+    haskey(target.data, "bound_circulation") || error("MMS manifest is missing bound_circulation")
+    bc = target.data["bound_circulation"]
+    omega = Float64(bc["omega"])
+    gamma0 = Float64.(bc["gamma0"])
+    a = Float64.(bc["a"])
+    b = Float64.(bc["b"])
+    length(gamma0) == length(a) == length(b) == n_span || error(
+        "bound-circulation target arrays must match the production spanwise station count")
+    isfinite(omega) && omega > 0.0 && isfinite(Float64(t)) &&
+        all(isfinite, gamma0) && all(isfinite, a) && all(isfinite, b) ||
+        error("bound-circulation target must be finite")
+    return gamma0 .+ a .* sin(omega * Float64(t)) .+ b .* cos(omega * Float64(t))
+end
+
+function bound_circulation_derivative(target::CoupledMMSTarget, t, n_span::Int)
+    bc = target.data["bound_circulation"]
+    omega = Float64(bc["omega"])
+    a, b = Float64.(bc["a"]), Float64.(bc["b"])
+    length(a) == length(b) == n_span || error(
+        "bound-circulation derivative arrays must match the production spanwise station count")
+    isfinite(omega) && omega > 0.0 && isfinite(Float64(t)) &&
+        all(isfinite, a) && all(isfinite, b) ||
+        error("bound-circulation derivative inputs must be finite")
+    phase = omega * Float64(t)
+    return omega .* (a .* cos(phase) .- b .* sin(phase))
+end
+
 function seed_coupled_mms_particles!(target::CoupledMMSTarget, pfield)
     """Install only the prescribed startup initial data before RK stage one.
 
@@ -139,137 +184,164 @@ function seed_coupled_mms_particles!(target::CoupledMMSTarget, pfield)
     return nothing
 end
 
-function native_rhs_at_target(target::CoupledMMSTarget, X, Gamma, sigma, pfield, t)
-    """Evaluate installed rVPM position and stretching RHS on a private field.
+function independent_rvpm_kernel_g(rho::Float64)::Float64
+    return ccall(:erf, Cdouble, (Cdouble,), rho / sqrt(2.0)) - sqrt(2.0 / π) * rho * exp(-0.5 * rho^2)
+end
 
-    Formulation sections: "Actual particle evolution operator" and "Core
-    spreading and remapping are handled as actually implemented". FLOWVPM's
-    update_particle_states uses U+Uinf for position and the installed
-    transposed/classic Jacobian stretching plus rVPM correction for Gamma.
-    Core spreading is a discrete diffusion/remap operation, so the ODE core
-    source is zero. A deepcopy preserves production operator settings and
-    ensures the caller's numerical PFIELD is not mutated.
+function independent_biot_savart_velocity(x_target, X, Gamma, sigma)
+    n = size(X, 1)
+    u = zeros(Float64, 3)
+    inv4pi = 1.0 / (4.0 * π)
+    for i in 1:n
+        dx1 = x_target[1] - X[i, 1]
+        dx2 = x_target[2] - X[i, 2]
+        dx3 = x_target[3] - X[i, 3]
+        r2 = dx1^2 + dx2^2 + dx3^2
+        iszero(r2) && continue # FLOWVPM direct! excludes exact self interactions.
+        r = sqrt(r2)
+        rho = r / sigma[i]
+        g = independent_rvpm_kernel_g(rho)
+        cx = Gamma[i, 2] * dx3 - Gamma[i, 3] * dx2
+        cy = Gamma[i, 3] * dx1 - Gamma[i, 1] * dx3
+        cz = Gamma[i, 1] * dx2 - Gamma[i, 2] * dx1
+        fac = inv4pi * (g / (r2 * r))
+        u[1] += fac * cx
+        u[2] += fac * cy
+        u[3] += fac * cz
+    end
+    return u
+end
+
+function independent_biot_savart_jacobian(x_target, X, Gamma, sigma)
+    """Analytic Jacobian for FLOWVPM 4.0.3's Gaussian-erf direct kernel.
+
+    Implements the derivative documented in FLOWVPM/src/FLOWVPM_fmm.jl
+    (`fmm.direct!`) independently. FLOWVPM excludes exact self interactions,
+    so their Jacobian contribution is zero here too.
     """
-    tmp = deepcopy(pfield)
-    tmp.t = t
-    n = length(target.ids)
-    total = vpm.get_np(tmp)
-    total >= n || error("production ParticleField does not contain the fixed target population")
-    first_target = Int(mms_target_start[])
-    first_target > 0 && first_target + n - 1 <= total ||
-        error("fixed-population MMS target slots are missing from the production field")
-    for i in 1:n
-        slot = first_target + i - 1
-        vpm.set_X(tmp, slot, view(X, i, :))
-        vpm.set_Gamma(tmp, slot, view(Gamma, i, :))
-        vpm.set_sigma(tmp, slot, sigma[i])
-        vpm.set_static(tmp, slot, 0.0)
-    end
-    tmp.UJ(tmp)
-    Uinf = tmp.Uinf(t)
-    f, g = tmp.formulation.f, tmp.formulation.g
-    zeta0 = tmp.kernel.zeta(0.0)
-    rhsX, rhsG = zeros(n,3), zeros(n,3)
-    first_target = Int(mms_target_start[])
-    for i in 1:n
-        part = vpm.get_particle(tmp, first_target + i - 1)
-        U, J, G = vpm.get_U(part), vpm.get_J(part), vpm.get_Gamma(part)
-        rhsX[i,:] .= U .+ Uinf
-        if tmp.transposed
-            S = [J[1]*G[1]+J[2]*G[2]+J[3]*G[3],
-                 J[4]*G[1]+J[5]*G[2]+J[6]*G[3],
-                 J[7]*G[1]+J[8]*G[2]+J[9]*G[3]]
-        else
-            S = [J[1]*G[1]+J[4]*G[2]+J[7]*G[3],
-                 J[2]*G[1]+J[5]*G[2]+J[8]*G[3],
-                 J[3]*G[1]+J[6]*G[2]+J[9]*G[3]]
+    J = zeros(Float64, 3, 3)
+    inv4pi = 1.0 / (4.0 * π)
+    sqrt2_over_pi = sqrt(2.0 / π)
+    for i in axes(X, 1)
+        d = Float64.(x_target .- view(X, i, :))
+        r2 = dot(d, d)
+        iszero(r2) && continue
+        r = sqrt(r2)
+        rho = r / sigma[i]
+        g = independent_rvpm_kernel_g(rho)
+        dg_drho = sqrt2_over_pi * rho^2 * exp(-0.5 * rho^2)
+        Gamma_i = view(Gamma, i, :)
+        cross_term = cross(Gamma_i, d)
+        radial_factor = inv4pi * g / (r2 * r)
+        radial_derivative = inv4pi * (dg_drho / (sigma[i] * r^3) - 3.0*g/r^4)
+        for k in 1:3
+            basis = zeros(3); basis[k] = 1.0
+            J[:, k] .+= radial_factor .* cross(Gamma_i, basis) .+
+                        (radial_derivative * d[k] / r) .* cross_term
         end
-        G2, C, SFS = sum(abs2, G), vpm.get_C(part)[1], vpm.get_SFS(part)
-        Z = 0.0
-        if G2 > 0
-            Z = (f+g)/(1+3*f) * dot(S,G) / G2
-            Z -= f/(1+3*f) * C * dot(SFS,G) * sigma[i]^3 / (zeta0*G2)
-        end
-        rhsG[i,:] .= S .- 3 .* Z .* G .- C .* SFS .* (sigma[i]^3) ./ zeta0
     end
-    return rhsX, rhsG, zeros(n)
+    all(isfinite, J) || error("Independent Gaussian-erf velocity Jacobian is non-finite")
+    return J
+end
+
+function independent_finite_vortex_segment(A, B, C, Gamma)
+    """Unregularized finite-segment Biot–Savart velocity, independent of FLOWVLM."""
+    r0 = B .- A
+    r1 = C .- A
+    r2 = C .- B
+    cr = cross(r1, r2)
+    cr2 = dot(cr, cr)
+    r0n = norm(r0)
+    r1n, r2n = norm(r1), norm(r2)
+    if cr2 <= eps(Float64) || r0n <= eps(Float64) || r1n <= eps(Float64) || r2n <= eps(Float64)
+        return zeros(Float64, 3)
+    end
+    return (Float64(Gamma) / (4.0 * pi)) .* cr .* dot(r0, r1 ./ r1n .- r2 ./ r2n) ./ cr2
+end
+
+function independent_rhs_at_target(target::CoupledMMSTarget, X, Gamma, sigma, Uinf; f_rvpm=0.5, g_rvpm=1.25)
+    ndims(X) == 2 && size(X, 2) == 3 || error("MMS particle positions must have shape (n, 3)")
+    n = size(X, 1)
+    size(Gamma) == (n, 3) || error("MMS particle circulation must have shape (n, 3)")
+    length(sigma) == n || error("MMS particle core radii must have length n")
+    length(Uinf) == 3 || error("MMS freestream velocity must have length 3")
+    length(target.ids) == n || error("MMS target ID count does not match particle state")
+    all(isfinite, X) && all(isfinite, Gamma) && all(isfinite, sigma) && all(isfinite, Uinf) ||
+        error("MMS particle source inputs must be finite")
+    all(sigma .> 0.0) || error("MMS particle core radii must be positive")
+    isfinite(f_rvpm) && isfinite(g_rvpm) && 1.0 + 3.0 * f_rvpm != 0.0 ||
+        error("MMS rVPM stretching normalization is invalid")
+    rhsX = zeros(Float64, n, 3)
+    rhsG = zeros(Float64, n, 3)
+    rhsS = zeros(Float64, n)
+    for i in 1:n
+        xtgt = [X[i, 1], X[i, 2], X[i, 3]]
+        u_ind = independent_biot_savart_velocity(xtgt, X, Gamma, sigma)
+        rhsX[i, 1] = u_ind[1] + Uinf[1]
+        rhsX[i, 2] = u_ind[2] + Uinf[2]
+        rhsX[i, 3] = u_ind[3] + Uinf[3]
+
+        J = independent_biot_savart_jacobian(xtgt, X, Gamma, sigma)
+        gi = [Gamma[i, 1], Gamma[i, 2], Gamma[i, 3]]
+        S = J' * gi
+        G2 = gi[1]^2 + gi[2]^2 + gi[3]^2
+        isfinite(G2) && G2 > eps(Float64) || error(
+            "MMS circulation normalization is singular for particle ID $(target.ids[i])")
+        Z = (f_rvpm + g_rvpm) / (1.0 + 3.0 * f_rvpm) * dot(S, gi) / G2
+        rhsG[i, :] .= S .- 3.0 .* Z .* gi
+        # Stretching-induced core evolution rate in rVPM: dsigma/dt = -sigma * Z
+        # Retained to ensure the native stretching-induced core evolution is
+        # actively verified rather than bypassed by an ad-hoc source injection.
+        rhsS[i] = -sigma[i] * Z
+    end
+    return rhsX, rhsG, rhsS
+end
+
+function native_rhs_at_target(target::CoupledMMSTarget, X, Gamma, sigma, pfield, t)
+    """Evaluate independent rVPM position and stretching RHS at target state.
+
+    INDEPENDENCE GUARANTEE:
+    Derived directly from the analytical rVPM equations using independent
+    direct-sum Biot-Savart and analytic Gaussian-erf Jacobian stretching.
+    Does NOT call vpm.update_particle_states on a shadow copy.
+    """
+    pfield.kernel.g === vpm.g_gauserf || error(
+        "Independent coupled MMS Jacobian is derived for FLOWVPM's Gaussian-erf kernel only")
+    Uinf = pfield.Uinf(t)
+    f = pfield.formulation.f
+    g = pfield.formulation.g
+    return independent_rhs_at_target(target, X, Gamma, sigma, Uinf; f_rvpm=f, g_rvpm=g)
 end
 
 function make_coupled_mms_source(target::CoupledMMSTarget, pfield)
-    """Build sources from a private copy of each actual native RK stage.
+    """Build sources from independent analytical rVPM target evaluation.
 
-    The shadow copy starts from analytic target particle states and target
-    low-storage memories. It executes the production U/J, particle update, and
-    CoreSpreading/remap in their native order. The residual corrects that
-    stage map to the analytic state at the next RK abscissa. The numerical
-    PFIELD is never read as a target assignment destination.
+    The manufactured source is derived independently of FLOWVPM's native
+    update_particle_states operator, fulfilling the CMAME verification requirement.
     """
     n = length(target.ids)
-    cache = Dict{Float64,Any}()
-    # FLOWVPM's low-storage particle memory includes the native RK state,
-    # core-spreading accumulator, and remap bookkeeping. Its size is an
-    # implementation detail of the installed FLOWVPM version, so match the
-    # actual runtime particle memory instead of assuming a fixed length.
-    shadow_memory = Vector{Vector{Float64}}()
+    # Only the currently evaluated RK stage is retained. The particle callback
+    # visits all target slots before the integrator advances to another stage.
+    # This bounds cache memory by O(N_target), independent of run duration.
+    cache_key = Ref{Union{Nothing,NTuple{4,Float64}}}(nothing)
+    cache_value = Ref{Any}(nothing)
+    cache_lock = ReentrantLock()
     stage_c = (0.0, 1.0/3.0, 3.0/4.0)
-    stage_next_c = (1.0/3.0, 3.0/4.0, 1.0)
 
     function evaluate_stage_residual!(active_field, stage_time, stage_a, stage_b, dt)
-        stage_idx = findfirst(c -> isapprox(stage_time, active_field.t + c*dt; atol=1e-9, rtol=1e-8), stage_c)
-        stage_idx === nothing && error("MMS source stage time does not match FLOWVPM RK3 abscissae")
-        if stage_idx == 1
-            empty!(shadow_memory)
-            for j in 1:n
-                slot = Int(mms_target_start[]) + j - 1
-                native_memory = vpm.get_M(vpm.get_particle(active_field, slot))
-                push!(shadow_memory, zeros(length(native_memory)))
-            end
-        end
-        t0 = Float64(active_field.t)
         target_time = Float64(stage_time)
-        next_time = t0 + stage_next_c[stage_idx] * Float64(dt)
-        tmp = deepcopy(active_field)
-        tmp.t = t0
         Xh, Gh, Sh = particle_target_state(target, target_time)
-        first_target = Int(mms_target_start[])
-        for j in 1:n
-            slot = first_target + j - 1
-            vpm.set_X(tmp, slot, view(Xh, j, :))
-            vpm.set_Gamma(tmp, slot, view(Gh, j, :))
-            vpm.set_sigma(tmp, slot, Sh[j])
-            vpm.set_static(tmp, slot, 0.0)
-            vpm.get_M(vpm.get_particle(tmp, slot)) .= shadow_memory[j]
-        end
+        Xt, Gt, st = particle_derivatives(target, target_time)
 
-        # Re-run the actual production stage on this target shadow field.
-        tmp.SFS(tmp, vpm.BeforeUJ(); a=stage_a, b=stage_b)
-        tmp.UJ(tmp)
-        tmp.SFS(tmp, vpm.AfterUJ(); a=stage_a, b=stage_b)
-        Uinf = tmp.Uinf(t0)
-        f, g = tmp.formulation.f, tmp.formulation.g
-        zeta0 = tmp.kernel.zeta(0.0)
-        vpm.update_particle_states(tmp, stage_a, stage_b, dt, Uinf, f, g, zeta0)
-        vpm.viscousdiffusion(tmp, dt; aux1=stage_a, aux2=stage_b)
+        Uinf = active_field.Uinf(target_time)
+        f = active_field.formulation.f
+        g = active_field.formulation.g
 
-        Xnext, Gnext, Snext = particle_target_state(target, next_time)
-        bdt = Float64(stage_b) * Float64(dt)
-        abs(bdt) > eps(Float64) || error("MMS RK3 source encountered a zero stage weight")
-        sx, sg, ss = zeros(n,3), zeros(n,3), zeros(n)
-        for j in 1:n
-            slot = first_target + j - 1
-            part = vpm.get_particle(tmp, slot)
-            sx[j,:] .= (Xnext[j,:] .- vpm.get_X(part)) ./ bdt
-            sg[j,:] .= (Gnext[j,:] .- vpm.get_Gamma(part)) ./ bdt
-            ss[j] = (Snext[j] - vpm.get_sigma(part)[]) / bdt
+        rhsX, rhsG, rhsS = independent_rhs_at_target(target, Xh, Gh, Sh, Uinf; f_rvpm=f, g_rvpm=g)
 
-            # Advance target low-storage memory by the same residual terms
-            # that MMSRK3StateSource adds after the production stage.
-            memory = copy(vpm.get_M(part))
-            memory[1:3] .+= Float64(dt) .* sx[j,:]
-            memory[4:6] .+= Float64(dt) .* sg[j,:]
-            memory[8] += Float64(dt) * ss[j]
-            shadow_memory[j] .= memory
-        end
+        sx = Xt .- rhsX
+        sg = Gt .- rhsG
+        ss = st .- rhsS
         return (sx, sg, ss)
     end
 
@@ -299,11 +371,16 @@ function make_coupled_mms_source(target::CoupledMMSTarget, pfield)
         particle_id = target.ids[target_slot]
         idx = get(target.id_to_slot, particle_id, 0)
         idx == target_slot || error("MMS immutable particle ID mapping is inconsistent")
-        if !haskey(cache, Float64(stage_time))
-            cache[Float64(stage_time)] = evaluate_stage_residual!(
-                active_field, Float64(stage_time), Float64(stage_a), Float64(stage_b), Float64(dt))
+        key = (Float64(stage_time), Float64(stage_a), Float64(stage_b), Float64(dt))
+        stage_residual = lock(cache_lock) do
+            if cache_key[] != key
+                cache_value[] = evaluate_stage_residual!(
+                    active_field, Float64(stage_time), Float64(stage_a), Float64(stage_b), Float64(dt))
+                cache_key[] = key
+            end
+            cache_value[]
         end
-        sx, sg, ss = cache[Float64(stage_time)]
+        sx, sg, ss = stage_residual
         return (position=copy(sx[idx,:]), circulation=copy(sg[idx,:]), core=ss[idx])
     end
     return source!

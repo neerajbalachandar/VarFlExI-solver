@@ -1,0 +1,10 @@
+# Runtime outputs and verification artifacts
+results/
+__pycache__/
+*.py[cod]
+*.log
+*.h5
+*.xdmf
+*.vtu
+*.png
+*.pdf
