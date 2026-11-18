@@ -344,6 +344,9 @@ class VarFlExICoupler:
                     "cp_geometry_rms_error",
                     "cp_geometry_max_error",
                     "cp_geometry_relative_rms_error",
+                    "cp_geometry_reference_rms",
+                    "cp_chord_representation_rms_error",
+                    "cp_geometry_mapping_rms_error",
                     "lift",
                     "drag",
                     "cl",
@@ -391,6 +394,13 @@ class VarFlExICoupler:
                 cp_geometry_max_error = optional_float(geo_data, "cp_geometry_max_error")
                 cp_geometry_relative_rms_error = optional_float(
                     geo_data, "cp_geometry_relative_rms_error"
+                )
+                cp_geometry_reference_rms = optional_float(geo_data, "cp_geometry_reference_rms")
+                cp_chord_representation_rms_error = optional_float(
+                    geo_data, "cp_chord_representation_rms_error"
+                )
+                cp_geometry_mapping_rms_error = optional_float(
+                    geo_data, "cp_geometry_mapping_rms_error"
                 )
                 surface_strain_percent = optional_float(geo_data, "surface_strain_percent")
                 strain_increase_percentage_points = optional_float(
@@ -634,6 +644,9 @@ class VarFlExICoupler:
                         "cp_geometry_rms_error": cp_geometry_rms_error,
                         "cp_geometry_max_error": cp_geometry_max_error,
                         "cp_geometry_relative_rms_error": cp_geometry_relative_rms_error,
+                        "cp_geometry_reference_rms": cp_geometry_reference_rms,
+                        "cp_chord_representation_rms_error": cp_chord_representation_rms_error,
+                        "cp_geometry_mapping_rms_error": cp_geometry_mapping_rms_error,
                         "surface_strain_percent": surface_strain_percent,
                         "strain_increase_percentage_points": strain_increase_percentage_points,
                         "force_received": forces_received_raw,
@@ -687,6 +700,9 @@ class VarFlExICoupler:
                         f"{cp_geometry_rms_error:.6e}" if cp_geometry_rms_error == cp_geometry_rms_error else "nan",
                         f"{cp_geometry_max_error:.6e}" if cp_geometry_max_error == cp_geometry_max_error else "nan",
                         f"{cp_geometry_relative_rms_error:.6e}" if cp_geometry_relative_rms_error == cp_geometry_relative_rms_error else "nan",
+                        f"{cp_geometry_reference_rms:.6e}" if cp_geometry_reference_rms == cp_geometry_reference_rms else "nan",
+                        f"{cp_chord_representation_rms_error:.6e}" if cp_chord_representation_rms_error == cp_chord_representation_rms_error else "nan",
+                        f"{cp_geometry_mapping_rms_error:.6e}" if cp_geometry_mapping_rms_error == cp_geometry_mapping_rms_error else "nan",
                         f"{float(lift):.6e}",
                         f"{float(drag):.6e}",
                         f"{float(cl):.6e}" if cl == cl else "nan",

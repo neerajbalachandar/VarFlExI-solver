@@ -1,0 +1,2 @@
+run,metric,count,mean_rms_m,p95_rms_m,max_rms_m,global_relative_l2
+MC-CRM,total CP geometry reconstruction,599,0.00016021637066777964,0.00020851639,0.0002113131,nan

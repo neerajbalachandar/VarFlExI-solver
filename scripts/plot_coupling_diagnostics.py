@@ -59,6 +59,9 @@ SOLID_MESSAGE_TIMINGS = (
     "cp_geometry_rms_error",
     "cp_geometry_max_error",
     "cp_geometry_relative_rms_error",
+    "cp_geometry_reference_rms",
+    "cp_chord_representation_rms_error",
+    "cp_geometry_mapping_rms_error",
 )
 
 
@@ -239,6 +242,40 @@ def plot_displacement_transfer_error(runs: list[tuple[str, dict[str, np.ndarray]
         axis.text(0.5, 0.5, "CP displacement error was not logged in this legacy CSV.", transform=axis.transAxes, ha="center", va="center")
     save(fig, output_dir, "05_cp_displacement_error")
 
+    if any(
+        "cp_chord_representation_rms_error" in data or "cp_geometry_mapping_rms_error" in data
+        for _, data in runs
+    ):
+        fig, axis = plt.subplots(figsize=(8.2, 4.4))
+        for label, data in runs:
+            time = data["time"]
+            if "cp_geometry_rms_error" in data:
+                axis.semilogy(
+                    time,
+                    positive_for_log(aligned(data, "cp_geometry_rms_error")),
+                    label=f"{label}: total",
+                )
+            if "cp_chord_representation_rms_error" in data:
+                axis.semilogy(
+                    time,
+                    positive_for_log(aligned(data, "cp_chord_representation_rms_error")),
+                    "--",
+                    label=f"{label}: LE/TE representation floor",
+                )
+            if "cp_geometry_mapping_rms_error" in data:
+                axis.semilogy(
+                    time,
+                    positive_for_log(aligned(data, "cp_geometry_mapping_rms_error")),
+                    ":",
+                    label=f"{label}: geometry-map component",
+                )
+        axis.set_xlabel("coupling time [s]")
+        axis.set_ylabel("RMS displacement error [m]")
+        axis.set_title("CP geometry-error decomposition")
+        axis.grid(True, which="both", alpha=0.25)
+        axis.legend(fontsize=8)
+        save(fig, output_dir, "05b_cp_geometry_error_decomposition")
+
     fig, axis = plt.subplots(figsize=(8.2, 4.4))
     for label, data in runs:
         time = data["time"]
@@ -350,6 +387,9 @@ def write_summary(runs: list[tuple[str, dict[str, np.ndarray]]], output_dir: Pat
         "cp_geometry_rms_error",
         "cp_geometry_max_error",
         "cp_geometry_relative_rms_error",
+        "cp_geometry_reference_rms",
+        "cp_chord_representation_rms_error",
+        "cp_geometry_mapping_rms_error",
         "wait_for_solid_geometry_time",
         "server_send_geometry_time",
         "wait_for_fluid_force_time",
@@ -386,6 +426,40 @@ def write_summary(runs: list[tuple[str, dict[str, np.ndarray]]], output_dir: Pat
     )
 
 
+def write_geometry_accuracy_summary(runs: list[tuple[str, dict[str, np.ndarray]]], output_dir: Path) -> None:
+    """Write table-ready geometry metrics with a stable space-time normalization."""
+    components = (
+        ("total CP geometry reconstruction", "cp_geometry_rms_error"),
+        ("LE/TE chordwise representation floor", "cp_chord_representation_rms_error"),
+        ("geometry-map component", "cp_geometry_mapping_rms_error"),
+    )
+    with (output_dir / "geometry_accuracy_summary.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow([
+            "run", "metric", "count", "mean_rms_m", "p95_rms_m", "max_rms_m",
+            "global_relative_l2",
+        ])
+        for label, data in runs:
+            reference = aligned(data, "cp_geometry_reference_rms")
+            for metric_name, column in components:
+                if column not in data:
+                    continue
+                error = aligned(data, column)
+                valid = np.isfinite(error) & np.isfinite(reference)
+                sample = error[np.isfinite(error)]
+                if not sample.size:
+                    continue
+                denominator = float(np.sum(reference[valid] ** 2))
+                global_relative_l2 = (
+                    float(np.sqrt(np.sum(error[valid] ** 2) / denominator))
+                    if denominator > 1.0e-32 else float("nan")
+                )
+                writer.writerow([
+                    label, metric_name, sample.size, np.mean(sample),
+                    np.percentile(sample, 95), np.max(sample), global_relative_l2,
+                ])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("csv", nargs="+", type=Path, help="one or more coupling-history CSV files")
@@ -411,6 +485,7 @@ def main() -> None:
     plot_solver_health(runs, args.output_dir)
     plot_orchestrator_stages(runs, args.output_dir)
     write_summary(runs, args.output_dir)
+    write_geometry_accuracy_summary(runs, args.output_dir)
     print(f"Wrote plots and summary to {args.output_dir.resolve()}")
 
 

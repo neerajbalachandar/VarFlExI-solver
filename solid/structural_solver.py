@@ -402,7 +402,9 @@ class StructuralSolver:
         self.geometry_consistency_fp = open(self.geometry_consistency_path, "w")
         self.geometry_consistency_fp.write(
             "# step time station x y z u_ref_x u_ref_y u_ref_z u_geom_x u_geom_y u_geom_z "
-            "err_x err_y err_z err_norm\\n"
+            "u_linear_ref_x u_linear_ref_y u_linear_ref_z total_err_x total_err_y total_err_z "
+            "total_err_norm representation_err_x representation_err_y representation_err_z "
+            "representation_err_norm mapping_err_x mapping_err_y mapping_err_z mapping_err_norm\\n"
         )
         self.state_history_path = os.path.join(self.out_dir, "solid_state_history.csv")
         self.state_history_fp = open(self.state_history_path, "w", newline="", encoding="utf-8")
@@ -457,6 +459,9 @@ class StructuralSolver:
         self.cp_geometry_rms_errors = np.full((self.Nsteps,), np.nan, dtype=float)
         self.cp_geometry_max_errors = np.full((self.Nsteps,), np.nan, dtype=float)
         self.cp_geometry_relative_rms_errors = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.cp_geometry_reference_rms = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.cp_chord_representation_rms_errors = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.cp_geometry_mapping_rms_errors = np.full((self.Nsteps,), np.nan, dtype=float)
         self.force_residuals = np.full((self.Nsteps,), np.nan, dtype=float)
         self.force_reference_norms = np.full((self.Nsteps,), np.nan, dtype=float)
         self.force_relative_errors = np.full((self.Nsteps,), np.nan, dtype=float)
@@ -994,23 +999,67 @@ class StructuralSolver:
                     fallback_tree=self.interface_tree,
                     fallback_vals=interface_disp_cur,
                 )
+                # Separate the error imposed by the two-edge fluid geometry
+                # representation from the error introduced by the S->F map.
+                # The former remains even if LE/TE values are sampled exactly
+                # from the structural field.
+                u_le_reference = self.transfer.sample_vector_field_at_targets(
+                    self.model.q,
+                    self.le_targets,
+                    fallback_tree=self.interface_tree,
+                    fallback_vals=interface_disp_cur,
+                )
+                u_te_reference = self.transfer.sample_vector_field_at_targets(
+                    self.model.q,
+                    self.te_targets,
+                    fallback_tree=self.interface_tree,
+                    fallback_vals=interface_disp_cur,
+                )
+                u_cp_linear_reference = (
+                    (1.0 - self.eta_cp) * u_le_reference + self.eta_cp * u_te_reference
+                )
                 cp_geometry_error = u_cp_arr - u_cp_reference
+                cp_representation_error = u_cp_linear_reference - u_cp_reference
+                cp_mapping_error = u_cp_arr - u_cp_linear_reference
                 cp_error_norm = np.linalg.norm(cp_geometry_error, axis=1)
+                cp_representation_error_norm = np.linalg.norm(cp_representation_error, axis=1)
+                cp_mapping_error_norm = np.linalg.norm(cp_mapping_error, axis=1)
                 cp_reference_rms = np.sqrt(np.mean(np.sum(u_cp_reference ** 2, axis=1)))
                 self.cp_geometry_rms_errors[i_step] = np.sqrt(np.mean(cp_error_norm ** 2))
                 self.cp_geometry_max_errors[i_step] = np.max(cp_error_norm)
+                self.cp_geometry_reference_rms[i_step] = cp_reference_rms
+                self.cp_chord_representation_rms_errors[i_step] = np.sqrt(
+                    np.mean(cp_representation_error_norm ** 2)
+                )
+                self.cp_geometry_mapping_rms_errors[i_step] = np.sqrt(
+                    np.mean(cp_mapping_error_norm ** 2)
+                )
                 self.cp_geometry_relative_rms_errors[i_step] = self.cp_geometry_rms_errors[i_step] / max(
                     cp_reference_rms, self.epsilon_reg
                 )
-                for station, (coord, u_ref, u_geom, err, err_norm) in enumerate(
-                    zip(self.cp_targets, u_cp_reference, u_cp_arr, cp_geometry_error, cp_error_norm)
+                for station, (coord, u_ref, u_geom, u_linear_ref, err, err_norm, rep_err, rep_err_norm, map_err, map_err_norm) in enumerate(
+                    zip(
+                        self.cp_targets,
+                        u_cp_reference,
+                        u_cp_arr,
+                        u_cp_linear_reference,
+                        cp_geometry_error,
+                        cp_error_norm,
+                        cp_representation_error,
+                        cp_representation_error_norm,
+                        cp_mapping_error,
+                        cp_mapping_error_norm,
+                    )
                 ):
                     self.geometry_consistency_fp.write(
                         f"{i_step + 1} {self.time[i_step + 1]:.12e} {station} "
                         f"{coord[0]:.12e} {coord[1]:.12e} {coord[2]:.12e} "
                         f"{u_ref[0]:.12e} {u_ref[1]:.12e} {u_ref[2]:.12e} "
                         f"{u_geom[0]:.12e} {u_geom[1]:.12e} {u_geom[2]:.12e} "
-                        f"{err[0]:.12e} {err[1]:.12e} {err[2]:.12e} {err_norm:.12e}\n"
+                        f"{u_linear_ref[0]:.12e} {u_linear_ref[1]:.12e} {u_linear_ref[2]:.12e} "
+                        f"{err[0]:.12e} {err[1]:.12e} {err[2]:.12e} {err_norm:.12e} "
+                        f"{rep_err[0]:.12e} {rep_err[1]:.12e} {rep_err[2]:.12e} {rep_err_norm:.12e} "
+                        f"{map_err[0]:.12e} {map_err[1]:.12e} {map_err[2]:.12e} {map_err_norm:.12e}\n"
                     )
                 self.geometry_consistency_fp.flush()
                 zero_rot = np.zeros_like(u_cp_arr)
@@ -1062,6 +1111,9 @@ class StructuralSolver:
                         "cp_geometry_rms_error": self.cp_geometry_rms_errors[i_step],
                         "cp_geometry_max_error": self.cp_geometry_max_errors[i_step],
                         "cp_geometry_relative_rms_error": self.cp_geometry_relative_rms_errors[i_step],
+                        "cp_geometry_reference_rms": self.cp_geometry_reference_rms[i_step],
+                        "cp_chord_representation_rms_error": self.cp_chord_representation_rms_errors[i_step],
+                        "cp_geometry_mapping_rms_error": self.cp_geometry_mapping_rms_errors[i_step],
                         "surface_strain_percent": self.surface_strain_percent[i_step],
                         "strain_increase_percentage_points": self.strain_increase_percentage_points[i_step],
                         "solid_solve_time": solid_solve_time,
@@ -1099,6 +1151,7 @@ class StructuralSolver:
                 "force_transfer_residual_norm,force_transfer_relative_error,"
                 "moment_transfer_residual_norm,moment_transfer_relative_error,"
                 "cp_geometry_rms_error,cp_geometry_max_error,cp_geometry_relative_rms_error,"
+                "cp_geometry_reference_rms,cp_chord_representation_rms_error,cp_geometry_mapping_rms_error,"
                 "force_residual,force_reference_norm,force_relative_error,"
                 "force_transfer_apply_time,"
                 "geometry_residual,geometry_reference_norm,geometry_relative_error,geometry_transfer_apply_time,"
@@ -1126,6 +1179,9 @@ class StructuralSolver:
                     f"{self.cp_geometry_rms_errors[k_idx]:.12e},"
                     f"{self.cp_geometry_max_errors[k_idx]:.12e},"
                     f"{self.cp_geometry_relative_rms_errors[k_idx]:.12e},"
+                    f"{self.cp_geometry_reference_rms[k_idx]:.12e},"
+                    f"{self.cp_chord_representation_rms_errors[k_idx]:.12e},"
+                    f"{self.cp_geometry_mapping_rms_errors[k_idx]:.12e},"
                     f"{self.force_residuals[k_idx]:.12e},"
                     f"{self.force_reference_norms[k_idx]:.12e},"
                     f"{self.force_relative_errors[k_idx]:.12e},"
