@@ -117,26 +117,27 @@ interface_traction:
 # spatial_cases: each case specifies (nx, ny, dt, duration).
 #   nx, ny: number of mesh intervals in x (chord) and y (span) directions.
 #   dt, duration: time step and physical end time.
-#   Mesh is refined while dt is held fixed to isolate spatial order.
+#   The time step is small and fixed so temporal error stays below the spatial
+#   error over this sequence; the refinement table still reports h explicitly.
 #   Linear element (CG1) theoretical spatial order: 2 for displacements.
 #   Quadratic element (CG2) theoretical spatial order: 3.
 #   Generalized-α theoretical temporal order: 2.
 #
 # temporal_cases: each case specifies (nx, ny, dt, duration).
-#   nx, ny: fixed fine mesh to minimize spatial pollution.
+#   nx, ny: finest configured mesh, fixed to minimize spatial pollution.
 #   dt refined to isolate temporal order.
 standalone_plate:
   element_degree: 2    # CG polynomial degree (must match production solver)
   spatial_cases:
-    - {nx:  6,  ny:   8, dt: 1.000e-3, duration: 0.005}
-    - {nx: 12,  ny:  16, dt: 1.000e-3, duration: 0.005}
-    - {nx: 24,  ny:  32, dt: 1.000e-3, duration: 0.005}
-    - {nx: 48,  ny:  64, dt: 1.000e-3, duration: 0.005}
+    - {nx:  6,  ny:   8, dt: 1.000e-4, duration: 0.005}
+    - {nx: 12,  ny:  16, dt: 1.000e-4, duration: 0.005}
+    - {nx: 24,  ny:  32, dt: 1.000e-4, duration: 0.005}
+    - {nx: 48,  ny:  64, dt: 1.000e-4, duration: 0.005}
   temporal_cases:
-    - {nx: 24, ny: 32, dt: 4.000e-3, duration: 0.02}
-    - {nx: 24, ny: 32, dt: 2.000e-3, duration: 0.02}
-    - {nx: 24, ny: 32, dt: 1.000e-3, duration: 0.02}
-    - {nx: 24, ny: 32, dt: 5.000e-4, duration: 0.02}
+    - {nx: 48, ny: 64, dt: 4.000e-3, duration: 0.2}
+    - {nx: 48, ny: 64, dt: 2.000e-3, duration: 0.2}
+    - {nx: 48, ny: 64, dt: 1.000e-3, duration: 0.2}
+    - {nx: 48, ny: 64, dt: 5.000e-4, duration: 0.2}
 
 # ---------------------------------------------------------------------------
 # REFINEMENT STUDY — COUPLED FSI
@@ -177,8 +178,8 @@ coupled:
 # Newton tolerance much tighter than default to ensure the nonlinear solver
 # residual is below the discretization error at the finest level.
 solvers:
-  newton_atol:          1.0e-10
-  newton_rtol:          1.0e-8
+  newton_atol:          1.0e-12
+  newton_rtol:          1.0e-12
   newton_maxiter:       25
   newton_max_backtracks: 12
   ksp_solver:           "mumps"      # direct LU (no iterative error at fine mesh)

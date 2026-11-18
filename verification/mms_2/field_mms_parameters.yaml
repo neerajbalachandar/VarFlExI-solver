@@ -5,7 +5,9 @@ output_dir: verification/mms_2/results
 analytical_reference_time_s: 0.05
 
 target:
-  amplitude: 0.02        # m^2/s for vector-potential scale
+  # Vector-potential scale (not a velocity amplitude); analytical preflight
+  # reports induced-velocity/freestream norms, currently O(1e-3).
+  amplitude: 0.02        # m^2/s
   frequency: 12.0       # rad/s; appreciable evolution over 0.05 s
   phase: 0.37           # rad; avoids component degeneracy
   center: [0.12, 0.48, 0.0]

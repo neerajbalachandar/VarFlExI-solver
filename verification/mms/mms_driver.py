@@ -373,7 +373,7 @@ def _run_jacobian_check(mms, solid, output_dir: Path):
     model = ReissnerMindlinModel(
         domain, solid["E"], solid["nu"], solid["rho_s"], solid["eta_m"], solid["eta_k"],
         solid["kappa_shear"], dolfin.Constant(0.01),
-        solid.get("alpha_m", 0.10), solid.get("alpha_f", 0.20),
+        solid.get("alpha_m", 0.5789473684210527), solid.get("alpha_f", 0.5263157894736842),
         geometric_nonlinearity=solid.get("geometric_nonlinearity", True),
         include_quadratic_inplane_strain=solid.get("include_quadratic_inplane_strain", True),
     )
@@ -578,10 +578,9 @@ def _audit_flowvpm_rk3_source() -> dict:
 def _run_scalar_genalpha_check(solid: dict, mms_p: dict, output_dir: Path):
     """Pure-Python scalar generalized-alpha ODE convergence check."""
     logger.info("Running scalar generalized-alpha ODE convergence check …")
-    rho = float(solid.get("alpha_inf", 0.9))
-    alpha_m = 0.5 * (3.0 - rho) / (1.0 + rho)
-    alpha_f = 1.0 / (1.0 + rho)
-    gamma_ga = 0.5 + alpha_f - alpha_m
+    alpha_m = float(solid.get("alpha_m", 0.5789473684210527))
+    alpha_f = float(solid.get("alpha_f", 0.5263157894736842))
+    gamma_ga = 0.5 + alpha_m - alpha_f
     beta_ga = 0.25 * (gamma_ga + 0.5) ** 2
 
     m_val, k_val, c_val = 1.0, 1.0, 0.0
@@ -601,17 +600,17 @@ def _run_scalar_genalpha_check(solid: dict, mms_p: dict, output_dir: Path):
         for step in range(n_steps):
             t_n = step * dt
             t_np1 = t_n + dt
-            t_af = t_n + alpha_f * dt
+            t_af = t_n + (1.0 - alpha_f) * dt
             y_pred = y_n + dt * yd_n + dt ** 2 * (0.5 - beta_ga) * ydd_n
             yd_pred = yd_n + dt * (1.0 - gamma_ga) * ydd_n
 
-            coeff = (m_val * alpha_m
-                     + c_val * alpha_f * gamma_ga * dt
-                     + k_val * alpha_f * beta_ga * dt ** 2)
+            coeff = (m_val * (1.0 - alpha_m)
+                     + c_val * (1.0 - alpha_f) * gamma_ga * dt
+                     + k_val * (1.0 - alpha_f) * beta_ga * dt ** 2)
             rhs = (f_star(t_af)
-                   - k_val * (alpha_f * y_pred + (1.0 - alpha_f) * y_n)
-                   - c_val * (alpha_f * yd_pred + (1.0 - alpha_f) * yd_n)
-                   - m_val * (1.0 - alpha_m) * ydd_n)
+                   - k_val * (alpha_f * y_n + (1.0 - alpha_f) * y_pred)
+                   - c_val * (alpha_f * yd_n + (1.0 - alpha_f) * yd_pred)
+                   - m_val * alpha_m * ydd_n)
             ydd_np1 = rhs / coeff
             y_np1 = y_pred + beta_ga * dt ** 2 * ydd_np1
             yd_np1 = yd_pred + gamma_ga * dt * ydd_np1
@@ -709,7 +708,7 @@ def _run_plate_refinement_study(mms, solid: dict, mms_p: dict, cases: List[dict]
         )
         model = ReissnerMindlinModel(
             domain, solid["E"], solid["nu"], solid["rho_s"], solid["eta_m"], solid["eta_k"],
-            solid["kappa_shear"], Constant(dt), solid.get("alpha_m", 0.1), solid.get("alpha_f", 0.2),
+            solid["kappa_shear"], Constant(dt), solid.get("alpha_m", 0.5789473684210527), solid.get("alpha_f", 0.5263157894736842),
             geometric_nonlinearity=nonlinear,
             include_quadratic_inplane_strain=solid.get("include_quadratic_inplane_strain", True),
         )
@@ -750,7 +749,7 @@ def _run_plate_refinement_study(mms, solid: dict, mms_p: dict, cases: List[dict]
         newton_maxit = int(mms_p.get("solvers", {}).get("newton_maxiter", 25))
 
         n_steps = max(1, int(round(duration / dt)))
-        alpha_f_val = float(solid.get("alpha_f", 0.2))
+        alpha_f_val = float(solid.get("alpha_f", 0.5263157894736842))
 
         for step in range(1, n_steps + 1):
             t_force = (step - alpha_f_val) * dt
@@ -941,7 +940,7 @@ def run_transfer(solid: dict, fluid: dict, coupling: dict, mms_p: dict,
                 )
                 model = ReissnerMindlinModel(
                     domain, solid["E"], solid["nu"], solid["rho_s"], solid["eta_m"], solid["eta_k"],
-                    solid["kappa_shear"], dolfin.Constant(0.01), solid.get("alpha_m", 0.1), solid.get("alpha_f", 0.2),
+                    solid["kappa_shear"], dolfin.Constant(0.01), solid.get("alpha_m", 0.5789473684210527), solid.get("alpha_f", 0.5263157894736842),
                     geometric_nonlinearity=True,
                 )
 
@@ -1603,7 +1602,7 @@ def _extract_coupled_metrics(output_dir: Path, level: int,
         source_time = float(solid_row["source_evaluation_time_s"])
         alpha_m_time = float(solid_row["t_alpha_m_s"])
         alpha_f_time = float(solid_row["t_alpha_f_s"])
-        expected_gamma = 0.5 + alpha_f - alpha_m
+        expected_gamma = 0.5 + alpha_m - alpha_f
         expected_beta = (expected_gamma + 0.5)**2 / 4.0
         if (not all(math.isfinite(v) for v in (dt_structural, alpha_m, alpha_f, gamma, beta,
                                               source_time, alpha_m_time, alpha_f_time))
@@ -1917,8 +1916,8 @@ def run_automated_tests(solid: dict, fluid: dict, coupling: dict, mms_p: dict, o
         raise AssertionError("Canonical bound circulation must equal gamma0+b at t=0")
     manifest = build_mms_manifest(solid, fluid, coupling, mms_p)
     particle_target = ParticlePopulation.from_dict(manifest["particles"])
-    alpha_m = float(solid.get("alpha_m", 0.10))
-    alpha_f = float(solid.get("alpha_f", 0.20))
+    alpha_m = float(solid.get("alpha_m", 0.5789473684210527))
+    alpha_f = float(solid.get("alpha_f", 0.5263157894736842))
     from solid.utils.generalized_alpha_coefficients import parameters as production_ga_parameters
     production_gamma, production_beta = production_ga_parameters(alpha_m, alpha_f)
     coupled_target = CoupledMMSTarget.from_manifest(manifest)
@@ -1928,7 +1927,7 @@ def run_automated_tests(solid: dict, fluid: dict, coupling: dict, mms_p: dict, o
         0.5*coupled_target.structural.Lx, 0.5*coupled_target.structural.Ly, 0.01
     )
     q0, v0, a0 = (ga_target.q.copy(), ga_target.v.copy(), ga_target.a.copy())
-    gamma_ga = 0.5 + alpha_f - alpha_m
+    gamma_ga = 0.5 + alpha_m - alpha_f
     beta_ga = (gamma_ga + 0.5) ** 2 / 4.0
     if not (math.isclose(gamma_ga, production_gamma, rel_tol=0.0, abs_tol=1.0e-15)
             and math.isclose(beta_ga, production_beta, rel_tol=0.0, abs_tol=1.0e-15)):

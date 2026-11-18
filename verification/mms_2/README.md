@@ -135,6 +135,19 @@ count is a memory safety limit and exceeding it stops reconstruction.
 
 ## Metrics and refinement ownership
 
+The structural solver stores `alpha_m` and `alpha_f` as old-state weights:
+`x_stage = alpha*x_n + (1-alpha)*x_(n+1)`. Its second-order relation is
+therefore `gamma = 1/2 + alpha_m - alpha_f`; this is equivalent to the usual
+relation after converting from new-state weights. The selected `rho_inf=0.9`
+weights are recorded in `config/solid_params.yaml`. The scalar check and plate
+study use the same coefficients and evaluate the manufactured load at
+`t_n + (1-alpha_f)*dt`, the physical time of the force stage under this
+weighting convention.
+
+The standalone structural spatial study uses `dt=1e-4`; the temporal study
+uses the fixed `48x64` mesh and a common `0.2 s` endpoint. The structural
+Newton absolute and relative tolerances are `1e-12` for MMS runs.
+
 `field_mms.py` retains tensor-product Cartesian trapezoid weights and weighted
 vector/component L2 errors. Inputs, errors, scales, and norms must be finite;
 target normalization must be nonzero. Logarithmic order calculations require

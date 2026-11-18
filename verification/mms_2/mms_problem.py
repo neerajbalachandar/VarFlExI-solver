@@ -1242,7 +1242,7 @@ class DiscreteGeneralizedAlphaTarget:
         self.alpha_m, self.alpha_f, self.dt = map(float, (alpha_m, alpha_f, dt))
         if not all(math.isfinite(v) for v in (self.alpha_m, self.alpha_f, self.dt)) or self.dt <= 0:
             raise ValueError("generalized-alpha target requires finite parameters and positive dt")
-        self.gamma = 0.5 + self.alpha_f - self.alpha_m
+        self.gamma = 0.5 + self.alpha_m - self.alpha_f
         self.beta = (self.gamma + 0.5) ** 2 / 4.0
         if self.beta <= 0.0:
             raise ValueError("generalized-alpha beta must be positive")

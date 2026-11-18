@@ -38,8 +38,8 @@ def main():
     domain = SolidDomain(cfg["span"], cfg["root_chord"], cfg["tip_chord"], cfg["thickness_ratio"],
                          cfg.get("leading_edge_sweep", 0.0), nx, ny, min(ny, 40), "midpoint")
     model = ReissnerMindlinModel(domain, cfg["E"], cfg["nu"], cfg["rho_s"], cfg["eta_m"], cfg["eta_k"],
-                                 cfg["kappa_shear"], Constant(1e-3), cfg.get("alpha_m", 0.1),
-                                 cfg.get("alpha_f", 0.2), geometric_nonlinearity=cfg.get("geometric_nonlinearity", True),
+                                 cfg["kappa_shear"], Constant(1e-3), cfg.get("alpha_m", 0.5789473684210527),
+                                 cfg.get("alpha_f", 0.5263157894736842), geometric_nonlinearity=cfg.get("geometric_nonlinearity", True),
                                  include_quadratic_inplane_strain=cfg.get("include_quadratic_inplane_strain", True))
     if args.transverse_amplitude:
         spaces = [model.V.sub(i).collapse() for i in range(3)]

@@ -8,7 +8,7 @@ class GeneralizedAlphaIntegrator:
     ``average(old,new,alpha) = alpha*old + (1-alpha)*new``. The model thus
     evaluates inertia at ``a_(n+alpha_m)`` and damping/internal force at
     ``v_(n+alpha_f)`` / ``q_(n+alpha_f)``. Kinematic updates follow the
-    Newmark forms using ``gamma=.5+alpha_f-alpha_m`` and
+    Newmark forms using ``gamma=.5+alpha_m-alpha_f`` and
     ``beta=(gamma+.5)^2/4``.
     """
 

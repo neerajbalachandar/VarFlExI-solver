@@ -188,9 +188,9 @@ eta_m = Constant(float(os.getenv("SOLID_ETA_M", "0.02")))
 eta_k = Constant(float(os.getenv("SOLID_ETA_K", "1.0e-6")))
 kappa_shear = Constant(5.0 / 6.0)  # Shear correction factor for Reissner-Mindlin
 
-alpha_m = Constant(0.10)
-alpha_f = Constant(0.20)
-gamma = Constant(0.5 + alpha_f - alpha_m)
+alpha_m = Constant(0.5789473684210527)
+alpha_f = Constant(0.5263157894736842)
+gamma = Constant(0.5 + alpha_m - alpha_f)
 beta = Constant((gamma + 0.5) ** 2 / 4.0)
 
 print(

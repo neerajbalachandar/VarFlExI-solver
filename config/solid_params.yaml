@@ -34,8 +34,12 @@ kappa_shear: 0.833
 geometric_nonlinearity: true
 include_quadratic_inplane_strain: true
 
-alpha_m: 0.1
-alpha_f: 0.2
+# Generalized-alpha spectral radius at infinite frequency. The integrator
+# stores alpha_m/alpha_f as old-state weights, so these are the transformed
+# Chung-Hulbert parameters for rho_inf=0.9.
+alpha_inf: 0.9
+alpha_m: 0.5789473684210527
+alpha_f: 0.5263157894736842
 
 newton_atol: 1.0e-6
 newton_rtol: 1.0e-4

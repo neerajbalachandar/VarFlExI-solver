@@ -115,7 +115,7 @@ class StructuralSolver:
             self.mms_spaces = [self.model.V.sub(i).collapse() for i in range(3)]
             alpha_m = float(self.model.integrator.alpha_m)
             alpha_f = float(self.model.integrator.alpha_f)
-            gamma = 0.5 + alpha_f - alpha_m
+            gamma = 0.5 + alpha_m - alpha_f
             beta = (gamma + 0.5) ** 2 / 4.0
             self.mms_target_history = DiscreteGeneralizedAlphaTarget(
                 self.mms_target, alpha_m, alpha_f, self.dt_value
@@ -234,8 +234,8 @@ class StructuralSolver:
             eta_k=cfg_get(self.solid_config, "eta_k"),
             kappa_shear=cfg_get(self.solid_config, "kappa_shear"),
             dt=self.dt,
-            alpha_m=cfg_get(self.solid_config, "alpha_m", default=0.10),
-            alpha_f=cfg_get(self.solid_config, "alpha_f", default=0.20),
+            alpha_m=cfg_get(self.solid_config, "alpha_m", default=0.5789473684210527),
+            alpha_f=cfg_get(self.solid_config, "alpha_f", default=0.5263157894736842),
             geometric_nonlinearity=cfg_get(
                 self.solid_config, "geometric_nonlinearity", default=True
             ),
